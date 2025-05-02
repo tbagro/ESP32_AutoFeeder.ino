@@ -74,6 +74,8 @@ Este repositório contém o firmware para um alimentador automático controlado 
 ```
 - `manualDuration`: duração em segundos do pulso manual.
 - `schedules`: lista de objetos com `time` (segundos desde meia-noite) e `duration` em segundos.
+- interface homem maquina proposta
+![image](https://github.com/user-attachments/assets/1b6b81a9-00d1-4dea-85ae-0f15d058e63f)
 
 ---
 
