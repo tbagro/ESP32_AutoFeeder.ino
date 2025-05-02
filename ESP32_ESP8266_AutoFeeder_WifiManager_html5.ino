@@ -169,7 +169,7 @@ const char htmlPage[] PROGMEM = R"rawliteral(
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
   <title>Alimentador Automático</title>
   <style>
     :root {
@@ -180,64 +180,50 @@ const char htmlPage[] PROGMEM = R"rawliteral(
       --spacing: 1rem;
       --font: Arial, sans-serif;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    * { box-sizing: border-box; margin:0; padding:0; }
     body {
       font-family: var(--font);
-      background: #fff;
-      color: #333;
-      padding: var(--spacing);
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      max-width: 600px;
-      margin: 0 auto;
+      background:#fff; color:#333;
+      padding:var(--spacing);
+      max-width:600px; margin:0 auto;
     }
-    header { text-align: center; margin-bottom: var(--spacing); }
-    h1 { font-size: 1.8rem; margin-bottom: .5rem; }
-    #currentTime, #nextTrigger { font-weight: bold; margin-bottom: var(--spacing); }
+    header { text-align:center; margin-bottom:var(--spacing); }
+    h1 { font-size:1.8rem; margin-bottom:.5rem; }
+    #currentTime,#nextTrigger { font-weight:bold; margin-bottom:var(--spacing); }
     .card {
-      background: var(--bg-card);
-      border-radius: var(--radius);
-      padding: var(--spacing);
-      width: 100%;
-      margin-bottom: var(--spacing);
-      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      background:var(--bg-card);
+      border-radius:var(--radius);
+      padding:var(--spacing);
+      width:100%; margin-bottom:var(--spacing);
+      box-shadow:0 2px 4px rgba(0,0,0,0.1);
     }
-    form { display: flex; flex-direction: column; gap: .5rem; }
-    label { font-weight: bold; }
-    input[type="time"] {
-      padding: .5rem;
-      border: 1px solid #ccc;
-      border-radius: var(--radius);
-      width: 100%;
+    form { display:flex; flex-direction:column; gap:.5rem; }
+    label { font-weight:bold; }
+    input[type=time] {
+      padding:.5rem; border:1px solid #ccc;
+      border-radius:var(--radius); width:100%;
     }
     button {
-      padding: .6rem;
-      border: none;
-      border-radius: var(--radius);
-      background: var(--color-primary);
-      color: #fff;
-      font-size: 1rem;
-      cursor: pointer;
-      transition: opacity .2s;
+      padding:.6rem; border:none;
+      border-radius:var(--radius);
+      background:var(--color-primary);
+      color:#fff; font-size:1rem;
+      cursor:pointer; transition:opacity .2s;
+      width:100%;
     }
-    button:disabled { opacity: 0.6; cursor: not-allowed; }
-    ul { list-style: none; margin-top: .5rem; width: 100%; }
+    button:disabled { opacity:0.6; cursor:not-allowed; }
+    ul { list-style:none; margin-top:.5rem; width:100%; }
     li {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: .4rem 0;
-      border-bottom: 1px solid #e0e0e0;
+      display:flex; justify-content:space-between;
+      align-items:center; padding:.4rem 0;
+      border-bottom:1px solid #e0e0e0;
     }
     .btn-remove {
-      background: transparent;
-      color: var(--color-error);
-      font-weight: bold;
-      width: 2rem;
-      height: 2rem;
-      line-height: 2rem;
-      text-align: center;
+      background:transparent;
+      color:var(--color-error);
+      font-weight:bold; width:2rem;
+      height:2rem; line-height:2rem;
+      text-align:center;
     }
   </style>
 </head>
@@ -276,54 +262,35 @@ const char htmlPage[] PROGMEM = R"rawliteral(
   </footer>
 
   <script>
-    // 1) lê os valores injetados por handleRoot()
+    // Carrega valores injetados por handleRoot()
+    const rawManual = "%MANUAL%";
     const rawSchedules = "%SCHEDULES%";
-    const schedules = [];
-    if (rawSchedules && rawSchedules !== "nenhum") {
-      rawSchedules.split(',').forEach(token => {
-        const [time, duration] = token.split('|');
-        schedules.push({ time, duration });
-      });
-    }
-    // 2) inicial render
-    renderSchedules();
 
-    // utilitários
-    const pad = n => String(n).padStart(2, '0');
+    // Utilitários
+    const pad = n => String(n).padStart(2,'0');
     const parseHHMMSS = s => {
-      const [h, m, sec] = s.split(':').map(Number);
-      return h*3600 + m*60 + sec;
+      const [h,m,ses] = s.split(':').map(Number);
+      return h*3600 + m*60 + ses;
     };
     const formatHHMMSS = secs => {
       const h = Math.floor(secs/3600);
       const m = Math.floor((secs%3600)/60);
       const s = secs%60;
-      return [h, m, s].map(pad).join(':');
+      return [h,m,s].map(pad).join(':');
     };
 
-    // atualiza hora atual e próximo acionamento
-    function updateCurrentTime() {
-      document.getElementById('currentTime').textContent = 'Hora: ' + new Date().toLocaleTimeString();
-    }
-    function updateNextTrigger() {
-      const now = new Date(); let next = null;
-      schedules.forEach(o => {
-        const [h,m,s] = o.time.split(':').map(Number);
-        let d = new Date(now);
-        d.setHours(h, m, s, 0);
-        if (d <= now) d.setDate(d.getDate()+1);
-        if (!next || d < next) next = d;
+    // Estado inicial
+    let manualDurationSecs = parseHHMMSS(rawManual);
+    document.getElementById('manualDuration').value = rawManual;
+    const schedules = [];
+    if (rawSchedules && rawSchedules !== 'nenhum') {
+      rawSchedules.split(',').forEach(token => {
+        const [time, duration] = token.split('|');
+        schedules.push({ time, duration });
       });
-      if (next) {
-        const diff = Math.max(0, (next - now) / 1000);
-        document.getElementById('nextTrigger').textContent = 'Próximo Acionamento: ' + formatHHMMSS(Math.floor(diff));
-      }
     }
-    setInterval(updateCurrentTime, 1000);
-    setInterval(updateNextTrigger, 1000);
-    updateCurrentTime(); updateNextTrigger();
 
-    // renderiza lista de agendamentos
+    // Atualiza exibição
     function renderSchedules() {
       const ul = document.getElementById('scheduleList'); ul.innerHTML = '';
       schedules.forEach((o,i) => {
@@ -335,36 +302,55 @@ const char htmlPage[] PROGMEM = R"rawliteral(
         li.appendChild(btn); ul.appendChild(li);
       });
     }
+    renderSchedules();
 
-    // adiciona novo agendamento
+    // Atualiza hora e próximo acionamento
+    function updateCurrentTime() {
+      document.getElementById('currentTime').textContent = 'Hora: ' + new Date().toLocaleTimeString();
+    }
+    function updateNextTrigger() {
+      const now = new Date(); let next = null;
+      schedules.forEach(o => {
+        const [h,m,s] = o.time.split(':').map(Number);
+        let d = new Date(now); d.setHours(h,m,s,0);
+        if (d <= now) d.setDate(d.getDate()+1);
+        if (!next || d < next) next = d;
+      });
+      if (next) {
+        const diff = Math.max(0,(next - now)/1000);
+        document.getElementById('nextTrigger').textContent = 'Próximo Acionamento: ' + formatHHMMSS(Math.floor(diff));
+      }
+    }
+    setInterval(updateCurrentTime,1000);
+    setInterval(updateNextTrigger,1000);
+    updateCurrentTime(); updateNextTrigger();
+
+    // Handlers
     document.getElementById('addSchedule').onclick = () => {
       const t = document.getElementById('newScheduleTime').value;
       const d = document.getElementById('newScheduleDuration').value;
-      if (t && d) { schedules.push({ time: t, duration: d }); renderSchedules(); }
+      if (t && d) { schedules.push({time:t,duration:d}); renderSchedules(); }
     };
 
-    // salva agendamentos
     document.getElementById('saveSchedules').onclick = () => {
       const payload = 'schedules=' + encodeURIComponent(
-        schedules.map(o => `${o.time}|${o.duration}`).join(',')
+        schedules.map(o=>`${o.time}|${o.duration}`).join(',')
       );
-      fetch('/setSchedules', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: payload });
+      fetch('/setSchedules',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:payload});
     };
 
-    // pulso manual
     const manualBtn = document.getElementById('manualFeed');
-    document.getElementById('manualFeed').onclick = () => {
+    manualBtn.onclick = () => {
       manualBtn.disabled = true;
-      fetch('/feedNow', { method: 'POST' })
-        .then(() => setTimeout(() => manualBtn.disabled = false, manualDurationSecs*1000));
+      fetch('/feedNow',{method:'POST'})
+        .then(()=>setTimeout(()=>{ manualBtn.disabled=false; }, manualDurationSecs*1000));
     };
 
-    // salva duração manual
     document.getElementById('manualForm').onsubmit = e => {
       e.preventDefault();
       const v = document.getElementById('manualDuration').value;
-      fetch('/setManualDuration', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `manualDuration=${v}` })
-        .then(() => { manualDurationSecs = parseHHMMSS(v); });
+      fetch('/setManualDuration',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`manualDuration=${v}`})
+        .then(()=>{ manualDurationSecs = parseHHMMSS(v); });
     };
   </script>
 </body>
