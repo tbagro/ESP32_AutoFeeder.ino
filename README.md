@@ -77,6 +77,10 @@ Este repositório contém o firmware para um alimentador automático controlado 
 - interface homem maquina proposta
 ![image](https://github.com/user-attachments/assets/1b6b81a9-00d1-4dea-85ae-0f15d058e63f)
 
+
+Versão compativel com sonoff 
+![image](https://github.com/user-attachments/assets/4ddb7258-2778-4195-9d28-cc6b8e67064d)
+
 ---
 
 ### Licença
