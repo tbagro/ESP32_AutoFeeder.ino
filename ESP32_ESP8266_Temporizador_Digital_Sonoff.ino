@@ -112,91 +112,229 @@ const char htmlPage[] PROGMEM = R"rawliteral(
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1.0">
-  <title>Alimentador Automático</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Temporizador</title>
   <style>
-    body { font-family: system-ui, -apple-system, sans-serif; margin:0 auto; padding:20px; max-width:600px; background:#f5f5f5; }
-    h1 { text-align:center; color:#333; margin-bottom:30px; }
-    .card { background:#fff; padding:20px; margin-bottom:20px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.1); }
-    label { display:block; margin-bottom:8px; color:#555; font-weight:500; }
-    input[type=time], input[type=text] { width:100%; padding:10px; border:1px solid #ddd; border-radius:4px; margin-bottom:10px; }
-    button { width:100%; padding:12px; background:#2e7d32; color:#fff; border:none; border-radius:4px; font-weight:500; cursor:pointer; margin-bottom:10px; }
-    button:hover { background:#256427; }
-    button.secondary { background:#666; }
-    button.secondary:hover { background:#555; }
-    ul { list-style:none; padding:0; }
-    li { display:flex; justify-content:space-between; align-items:center; padding:8px; background:#f8f8f8; border-radius:4px; margin-bottom:8px; }
-    #currentTime { text-align:center; margin:20px 0; font-size:1.2em; color:#666; }
-    #nextTrigger { text-align:center; margin:20px 0; padding:10px; background:#e8f5e9; border-radius:4px; color:#2e7d32; }
-    .status-indicator { display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:20px; }
-    .led { width:15px; height:15px; border-radius:50%; background:#ccc; }
-    .led.active { background:#4caf50; box-shadow:0 0 10px #4caf50; }
-    .led.feeding { background:#ff9800; box-shadow:0 0 10px #ff9800; animation:pulse 1s infinite; }
-    @keyframes pulse { 0%{opacity:1;}50%{opacity:0.5;}100%{opacity:1;} }
-    #console { background:#111; color:#0f0; font-family:monospace; white-space:pre; padding:10px; height:120px; overflow-y:auto; border:1px solid #444; border-radius:4px; }
-    #console:focus { outline:none; }
-    .message { margin-top:10px; padding:10px; border-radius:4px; text-align:center; font-weight:bold; }
-    .message.success { background:#e6f4ea; color:#388e3c; border:1px solid #66bb6a; }
-    .message.error { background:#feebeb; color:#c62828; border:1px solid #ef5350; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      margin: 0 auto;
+      padding: 20px;
+      max-width: 600px;
+      background: #f5f5f5;
+    }
+    h1 {
+      text-align: center;
+      color: #333;
+      margin-bottom: 30px;
+    }
+    .card {
+      background: #fff;
+      padding: 20px;
+      margin-bottom: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    label {
+      display: block;
+      margin-bottom: 8px;
+      color: #555;
+      font-weight: 500;
+    }
+    input[type="time"],
+    input[type="text"] {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      margin-bottom: 10px;
+    }
+    button {
+      width: 100%;
+      padding: 12px;
+      background: #2e7d32;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-weight: 500;
+      cursor: pointer;
+      margin-bottom: 10px;
+    }
+    button:hover {
+      background: #256427;
+    }
+    button.secondary {
+      background: #666;
+    }
+    button.secondary:hover {
+      background: #555;
+    }
+    ul {
+      list-style: none;
+      padding: 0;
+    }
+    li {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px;
+      background: #f8f8f8;
+      border-radius: 4px;
+      margin-bottom: 8px;
+    }
+    .status-indicator {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    .led {
+      width: 15px;
+      height: 15px;
+      border-radius: 50%;
+      background: #ccc;
+    }
+    .led.active {
+      background: #4caf50;
+      box-shadow: 0 0 10px #4caf50;
+    }
+    .led.feeding {
+      background: #ff9800;
+      box-shadow: 0 0 10px #ff9800;
+      animation: pulse 1s infinite;
+    }
+    @keyframes pulse {
+      0%   { opacity: 1; }
+      50%  { opacity: 0.5; }
+      100% { opacity: 1; }
+    }
+    #currentTime,
+    #wifiQuality {
+      font-size: 1.2em;
+      color: #666;
+      margin-left: 8px;
+    }
+    #nextTrigger {
+      text-align: center;
+      margin: 20px 0;
+      padding: 10px;
+      background: #e8f5e9;
+      border-radius: 4px;
+      color: #2e7d32;
+    }
+    #console {
+      background: #111;
+      color: #0f0;
+      font-family: monospace;
+      white-space: pre;
+      padding: 10px;
+      height: 120px;
+      overflow-y: auto;
+      border: 1px solid #444;
+      border-radius: 4px;
+    }
+    #console:focus {
+      outline: none;
+    }
+    .message {
+      margin-top: 10px;
+      padding: 10px;
+      border-radius: 4px;
+      text-align: center;
+      font-weight: bold;
+    }
+    .message.success {
+      background: #e6f4ea;
+      color: #388e3c;
+      border: 1px solid #66bb6a;
+    }
+    .message.error {
+      background: #feebeb;
+      color: #c62828;
+      border: 1px solid #ef5350;
+    }
   </style>
 </head>
 <body>
-  <h1>Alimentador Automático</h1>
+  <h1>Temporizador Inteligente</h1>
 
-  <div class="status-indicator">
+  <section class="status-indicator">
     <div class="led %STATUS_CLASS%"></div>
     <div id="currentTime"></div>
-  </div>
+    <div id="wifiQuality">Wi‑Fi %WIFI_QUALITY%%</div>
+  </section>
 
-  <div class="card">
-    <button id="manualFeed">Alimentar Agora</button>
+  <section class="card">
+    <button id="manualFeed">Ativar Agora</button>
     <div id="manualFeedMessage" class="message"></div>
-  </div>
+  </section>
 
-  <form id="manualForm" class="card">
-    <label>Duração do Pulso (HH:MM:SS)</label>
-    <input type="time" id="manualInterval" step="1" value="%MANUAL%">
-    <button type="submit">Salvar Duração</button>
-    <div id="manualFormMessage" class="message"></div>
-  </form>
+  <section class="card">
+    <form id="manualForm">
+      <label for="manualInterval">Duração do Pulso (HH:MM:SS)</label>
+      <input type="time" id="manualInterval" step="1" value="%MANUAL%" />
+      <button type="submit">Salvar Duração</button>
+      <div id="manualFormMessage" class="message"></div>
+    </form>
+  </section>
 
-  <div class="card">
+  <section class="card">
     <form id="scheduleForm">
-      <label>Novo Horário (HH:MM:SS)</label>
-      <input type="time" id="newScheduleTime" step="1">
-      <label>Duração (HH:MM:SS)</label>
-      <input type="time" id="newScheduleInterval" step="1">
+      <label for="newScheduleTime">Novo Horário (HH:MM:SS)</label>
+      <input type="time" id="newScheduleTime" step="1" />
+      <label for="newScheduleInterval">Duração (HH:MM:SS)</label>
+      <input type="time" id="newScheduleInterval" step="1" />
       <button type="button" id="addSchedule">+ Adicionar Agendamento</button>
     </form>
     <ul id="scheduleList"></ul>
     <button id="saveSchedules">Salvar Agendamentos</button>
     <div id="scheduleFormMessage" class="message"></div>
-  </div>
+  </section>
 
-  <div class="card">
+  <section class="card">
     <label>Regras Avançadas (console)</label>
     <div id="console" contenteditable="true">%CUSTOM_RULES%</div>
     <button id="saveRules">Salvar Regras</button>
     <button id="toggleRules" class="secondary">%TOGGLE_BUTTON%</button>
     <div id="customRulesMessage" class="message"></div>
-  </div>
+  </section>
 
   <div id="nextTrigger"></div>
 
 <script>
+  
   function pad(n){ return n.toString().padStart(2,'0'); }
   function parseHHMMSS(s){ const p=s.split(':').map(Number); return p[0]*3600+p[1]*60+p[2]; }
   function formatHHMMSS(secs){ return [Math.floor(secs/3600),Math.floor((secs%3600)/60),secs%60].map(pad).join(':'); }
 
-  function updateCurrentTime(){
-    document.getElementById('currentTime').textContent = new Date().toLocaleTimeString();
+    // Busca RSSI e atualiza % ao lado da hora
+  function updateWifiPct() {
+    fetch('/rssi')
+      .then(res => res.json())
+      .then(j => {
+        document.getElementById('wifiPct').textContent = j.pct + '%';
+      })
+      .catch(_=> {
+        document.getElementById('wifiPct').textContent = '--';
+      });
   }
-  setInterval(updateCurrentTime,1000);
+
+  // A cada 5s, atualiza sinal Wi‑Fi
+  setInterval(updateWifiPct, 5000);
+  updateWifiPct();
+
+  function updateCurrentTime() {
+    const now = new Date();
+    document.getElementById('currentTime').textContent = now.toLocaleTimeString();
+    // opcional: você pode chamar updateWifiPct() aqui também
+  }
+  setInterval(updateCurrentTime, 1000);
   updateCurrentTime();
 
   let schedules = [], manualIntervalSecs = parseHHMMSS("%MANUAL%");
   const rawSch = "%SCHEDULES%";
   if(rawSch) schedules = rawSch.split(',').map(t=>{const a=t.split('|');return{time:a[0],interval:a[1]};});
+
   function renderSchedules(){
     const ul=document.getElementById('scheduleList'); ul.innerHTML='';
     schedules.forEach((o,i)=>{
@@ -504,11 +642,26 @@ P:
 }
 
 // =============== Web Server Handlers =============== //
+// Envia JSON { rssi: -xx, pct: yy }
+void handleRssi() {
+  int rssi = WiFi.RSSI();
+  int pct  = map(constrain(rssi, -90, -30), -90, -30, 0, 100);
+  String json = String("{\"rssi\":") + rssi + ",\"pct\":" + pct + "}";
+  server.send(200, "application/json", json);
+}
+
+
 void handleRoot() {
   String page = FPSTR(htmlPage);
 
+   // calcula RSSI e qualidade em %
+  int rssi    = WiFi.RSSI();  
+  int quality = map(constrain(rssi, -90, -30), -90, -30, 0, 100);
+
   // Replace placeholders
   page.replace("%MANUAL%", formatHHMMSS(manualDurationSec));
+  page.replace("%WIFI_QUALITY%", String(quality));
+  
 
   String scheduleList;
   for (int i = 0; i < scheduleCount; i++) {
@@ -821,17 +974,27 @@ void setupHardware() {
 void updateStatusLED() {
   static unsigned long lastBlink = 0;
   static bool ledState = false;
+  unsigned long now = millis();
 
   if (isFeeding) {
-    // Blink fast when feeding
-    if (millis() - lastBlink > 200) {
+    // Blink rápido enquanto alimentando
+    if (now - lastBlink > 200) {
       ledState = !ledState;
       digitalWrite(STATUS_LED_PIN, ledState);
-      lastBlink = millis();
+      lastBlink = now;
     }
   } else {
-    // Solid on when connected, off when not
-    digitalWrite(STATUS_LED_PIN, WiFi.status() == WL_CONNECTED ? LOW : HIGH);
+    if (WiFi.status() == WL_CONNECTED) {
+      // Conectado: LED ligado (ativo baixo na maioria das placas)
+      digitalWrite(STATUS_LED_PIN, LOW);
+    } else {
+      // Não conectado: pisca lento
+      if (now - lastBlink > 1000) {
+        ledState = !ledState;
+        digitalWrite(STATUS_LED_PIN, ledState);
+        lastBlink = now;
+      }
+    }
   }
 }
 
@@ -904,6 +1067,7 @@ void setup() {
 
   // 5) Rotas HTTP principais
   server.on("/", HTTP_GET, handleRoot);
+  server.on("/rssi", HTTP_GET, handleRssi);
   server.on("/feedNow", HTTP_POST, handleFeedNow);
   server.on("/setManualDuration", HTTP_POST, handleSetManualDuration);
   server.on("/setSchedules", HTTP_POST, handleSetSchedules);
