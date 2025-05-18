@@ -31,9 +31,8 @@ const int MAX_SLOTS = 10;
 const long GMT_OFFSET_SEC = -4 * 3600;  // UTC-4 (Cuiabá). Ajuste conforme o seu fuso horário.
 const int DAYLIGHT_OFFSET_SEC = 0;      // Horário de verão (0 se não aplicável)
 const char *NTP_SERVER = "time.google.com";
-const int FEED_COOLDOWN = 10;       // Segundos entre alimentações
-const int MAX_FEED_DURATION = 300;    // 5 minutos no máximo para alimentação manual/agendada
-// const unsigned long CUSTOM_RULE_DEFAULT_ON_DURATION_MS = (MAX_FEED_DURATION + 60) * 1000UL; // Não usado diretamente
+const int FEED_COOLDOWN = 10;       // Segundos entre ativações
+const int MAX_FEED_DURATION = 300;    // 5 minutos no máximo para ativação manual/agendada
 
 // --- Pinos de Hardware ---
 #ifdef SONOFF_BASIC
@@ -59,7 +58,7 @@ int currentFeederPin = defaultFeederPin;
 // =============== Data Structures =============== //
 struct Schedule {
   int timeSec;        // Hora do dia para o agendamento (segundos desde a meia-noite)
-  int durationSec;    // Duração da alimentação em segundos
+  int durationSec;    // Duração da ativação em segundos
   int lastTriggerDay; // Dia do ano em que foi acionado pela última vez (para evitar repetição no mesmo dia)
 };
 
@@ -75,12 +74,12 @@ WiFiUDP udp; // Para NTP
 
 Schedule schedules[MAX_SLOTS]; // Array para armazenar os agendamentos
 int scheduleCount = 0; // Número de agendamentos ativos
-unsigned long manualDurationSec = 5; // Duração padrão para alimentação manual (em segundos)
+unsigned long manualDurationSec = 5; // Duração padrão para ativação manual (em segundos)
 char customSchedule[512] = ""; // String para armazenar as regras personalizadas
 bool customEnabled = false; // Flag para indicar se as regras personalizadas estão ativas
-volatile bool isFeeding = false; // Flag para indicar se o alimentador está ativo (HIGH)
-unsigned long feedStartMs = 0; // Timestamp (millis) de quando a alimentação começou
-unsigned long feedDurationMs = 0; // Duração programada da alimentação atual (em milissegundos)
+volatile bool isOutputActive = false; // Flag para indicar se o dispositivo/saída está ativo (HIGH)
+unsigned long outputActivationStartMs = 0; // Timestamp (millis) de quando a ativação começou
+unsigned long outputActivationDurationMs = 0; // Duração programada da ativação atual (em milissegundos)
 unsigned long lastTriggerMs = 0; // Timestamp (millis) do último acionamento (para cooldown)
 
 // Timestamps (time_t) para regras IH/IL. São atualizados quando as regras customizadas estão ativas.
@@ -144,14 +143,14 @@ const char htmlPage[] PROGMEM = R"rawliteral(
     input[type="time"],
     input[type="text"],
     input[type="number"],
-    textarea { /* Estilo adicionado para textarea */
+    textarea {
       width: 100%;
       padding: 10px;
       border: 1px solid #ddd;
       border-radius: 4px;
       margin-bottom: 10px;
       box-sizing: border-box;
-      font-family: inherit; /* Garante que a textarea use a mesma fonte do corpo */
+      font-family: inherit;
     }
     button {
       width: 100%;
@@ -209,12 +208,12 @@ const char htmlPage[] PROGMEM = R"rawliteral(
       border-radius: 50%;
       background: #ccc;
     }
-    .led.active {
+    .led.active { /* LED verde para WiFi conectado e dispositivo inativo */
       background: #4caf50;
       box-shadow: 0 0 10px #4caf50;
     }
-    .led.feeding {
-      background: #ff9800;
+    .led.feeding { /* LED laranja para dispositivo ativo (piscando) - 'feeding' é a classe CSS, mantida por simplicidade */
+      background: #ff9800; /* Laranja para "ativo" */
       box-shadow: 0 0 10px #ff9800;
       animation: pulse 1s infinite;
     }
@@ -243,7 +242,7 @@ const char htmlPage[] PROGMEM = R"rawliteral(
         color: #e65100;
         display: none;
      }
-    #eventConsole { /* ID alterado de #console para #eventConsole */
+    #eventConsole {
       background: #111;
       color: #0f0;
       font-family: monospace;
@@ -253,9 +252,8 @@ const char htmlPage[] PROGMEM = R"rawliteral(
       overflow-y: auto;
       border: 1px solid #444;
       border-radius: 4px;
-      margin-top: 10px; /* Espaçamento adicionado */
+      margin-top: 10px;
     }
-    /* #eventConsole:focus { outline: none; } Não é mais necessário pois não é editável */
     .message {
       margin-top: 10px;
       padding: 10px;
@@ -274,44 +272,91 @@ const char htmlPage[] PROGMEM = R"rawliteral(
       color: #c62828;
       border: 1px solid #ef5350;
     }
+    details > summary {
+      padding: 8px;
+      background-color: #eee;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: 500;
+      margin-top: 15px;
+    }
+    details > div {
+      padding:10px;
+      background-color:#f9f9f9;
+      border:1px solid #eee;
+      border-top: none;
+      border-radius: 0 0 4px 4px;
+      margin-bottom: 10px;
+    }
+    details ul { margin-left: 20px; list-style-type: disc; }
+    details code { background-color: #e8e8e8; padding: 2px 4px; border-radius: 3px; }
+    .pin-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    .pin-table th, .pin-table td { border: 1px solid #ddd; padding: 6px; text-align: left; }
+    .pin-table th { background-color: #f2f2f2; }
   </style>
 </head>
 <body>
   <h1>Temporizador Inteligente</h1>
 
   <section class="status-indicator">
-    <div class="led %STATUS_CLASS%"></div>
-    <div id="currentTime">--:--:--</div>
+    <div class="led %STATUS_CLASS%"></div> <div id="currentTime">--:--:--</div>
     <div id="wifiQuality">Wi‑Fi: %WIFI_QUALITY%%</div>
   </section>
 
   <section class="card">
-    <button id="manualFeed">Ativar Agora</button>
-    <button id="stopFeed" class="warning" style="display: none;">Parar Alimentação</button>
-    <div id="manualFeedMessage" class="message"></div>
+    <button id="manualActivateOutput">Ativar Saída Agora</button>
+    <button id="manualDeactivateOutput" class="warning" style="display: none;">Desativar Saída</button>
+    <div id="manualOutputMessage" class="message"></div>
   </section>
 
   <section class="card">
-    <form id="manualForm">
-      <label for="manualInterval">Duração do Pulso (HH:MM:SS)</label>
+    <form id="manualDurationForm">
+      <label for="manualInterval">Duração do Pulso/Ativação (HH:MM:SS)</label>
       <input type="time" id="manualInterval" step="1" value="%MANUAL%" />
       <button type="submit">Salvar Duração</button>
-      <div id="manualFormMessage" class="message"></div>
+      <div id="manualDurationMessage" class="message"></div>
     </form>
   </section>
 
-  <section class="card"> <form id="feederPinForm">
-      <label for="feederPin">Pino do Alimentador (GPIO):</label>
-      <input type="number" id="feederPin" value="%FEEDER_PIN_VALUE%" min="0" max="39"> <button type="submit">Salvar Pino do Alimentador</button>
-      <div id="feederPinFormMessage" class="message"></div>
+  <section class="card">
+    <form id="outputPinForm">
+      <label for="outputPinInput">Pino de Saída (GPIO):</label>
+      <input type="number" id="outputPinInput" value="%OUTPUT_PIN_VALUE%" min="0" max="39">
+      <button type="submit">Salvar Pino de Saída</button>
+      <div id="outputPinMessage" class="message"></div>
     </form>
+    <details>
+        <summary>Ajuda: Pinos Wemos D1 Mini (ESP8266)</summary>
+        <div>
+            <p>Abaixo uma referência dos pinos do Wemos D1 Mini e seus GPIOs correspondentes. Insira o número GPIO no campo acima.</p>
+            <table class="pin-table">
+                <thead><tr><th>Pino (Silk)</th><th>GPIO</th><th>Observações</th></tr></thead>
+                <tbody>
+                    <tr><td>D0</td><td>16</td><td>LED integrado (em algumas versões), sem PWM/I2C/SPI, cuidado ao usar.</td></tr>
+                    <tr><td>D1</td><td>5</td><td>SCL (I2C)</td></tr>
+                    <tr><td>D2</td><td>4</td><td>SDA (I2C)</td></tr>
+                    <tr><td>D3</td><td>0</td><td>Flash Mode (nível BAIXO no boot entra em modo flash).</td></tr>
+                    <tr><td>D4</td><td>2</td><td>TXD1, LED integrado (azul).</td></tr>
+                    <tr><td>D5</td><td>14</td><td>HSCLK (SPI)</td></tr>
+                    <tr><td>D6</td><td>12</td><td>HMISO (SPI)</td></tr>
+                    <tr><td>D7</td><td>13</td><td>HMOSI/RXD2 (SPI)</td></tr>
+                    <tr><td>D8</td><td>15</td><td>HCS (SPI), deve estar em nível BAIXO no boot.</td></tr>
+                    <tr><td>RX</td><td>3</td><td>RXD0</td></tr>
+                    <tr><td>TX</td><td>1</td><td>TXD0 (Debug)</td></tr>
+                </tbody>
+            </table>
+            <p><small><strong>Recomendação:</strong> Para saídas simples, D1, D2, D5, D6, D7 são geralmente seguros. Evite D0, D3, D4, D8, RX, TX a menos que saiba as implicações.</small></p>
+            <p><small>Para placas ESP32, consulte o pinout específico da sua placa.</small></p>
+        </div>
+    </details>
   </section>
 
   <section class="card">
     <form id="scheduleForm">
-      <label for="newScheduleTime">Novo Horário (HH:MM:SS)</label>
+      <label for="newScheduleTime">Novo Horário de Ativação (HH:MM:SS)</label>
       <input type="time" id="newScheduleTime" step="1" />
-      <label for="newScheduleInterval">Duração (HH:MM:SS)</label>
+      <label for="newScheduleInterval">Duração da Ativação (HH:MM:SS)</label>
       <input type="time" id="newScheduleInterval" step="1" />
       <button type="button" id="addSchedule">+ Adicionar Agendamento</button>
     </form>
@@ -326,23 +371,39 @@ const char htmlPage[] PROGMEM = R"rawliteral(
     <button id="saveRules">Salvar Regras</button>
     <button id="toggleRules" class="secondary">%TOGGLE_BUTTON%</button>
     <div id="customRulesMessage" class="message"></div>
+
+    <details>
+        <summary>Ajuda: Sintaxe das Regras Customizadas</summary>
+        <div>
+            <p><strong>Prefixos Principais:</strong></p>
+            <ul>
+                <li><code>DH HH:MM:SS</code>: <strong>Diário Alto (Ligar Saída)</strong> - Liga a saída todos os dias no horário especificado.</li>
+                <li><code>DL HH:MM:SS</code>: <strong>Diário Baixo (Desligar Saída)</strong> - Desliga a saída todos os dias no horário especificado.</li>
+                <li><code>WH d HH:MM:SS</code>: <strong>Semanal Alto (Ligar Saída)</strong> - Liga a saída no dia da semana <code>d</code> (1=Domingo, ..., 7=Sábado) no horário especificado.</li>
+                <li><code>WL d HH:MM:SS</code>: <strong>Semanal Baixo (Desligar Saída)</strong> - Desliga a saída no dia da semana <code>d</code> no horário especificado.</li>
+                <li><code>SH AAAA-MM-DD HH:MM</code>: <strong>Específico Alto (Ligar Saída)</strong> - Liga a saída na data e hora exatas. (Segundos não são usados aqui).</li>
+                <li><code>SL AAAA-MM-DD HH:MM</code>: <strong>Específico Baixo (Desligar Saída)</strong> - Desliga a saída na data e hora exatas. (Segundos não são usados aqui).</li>
+                <li><code>IH HH:MM:SS</code>: <strong>Intervalo Alto (Desligar após Ligado)</strong> - Se a saída estiver LIGADA, ela será DESLIGADA após o intervalo de tempo especificado.</li>
+                <li><code>IL HH:MM:SS</code>: <strong>Intervalo Baixo (Ligar após Desligado)</strong> - Se a saída estiver DESLIGADA, ela será LIGADA após o intervalo de tempo especificado.</li>
+            </ul>
+            <p><small>Consulte a documentação completa para mais exemplos e detalhes.</small></p>
+        </div>
+    </details>
+
     <label for="eventConsole" style="margin-top:15px;">Console de Eventos:</label>
-    <div id="eventConsole"></div> </section>
+    <div id="eventConsole"></div>
+  </section>
 
   <div id="nextTrigger">Carregando...</div>
   <div id="customRuleCountdown"></div>
 <script>
-  // Função para adicionar zero à esquerda se n < 10
   function pad(n){ return n.toString().padStart(2,'0'); }
-  // Converte HH:MM:SS para segundos totais
   function parseHHMMSS_to_secs(s){ const p=s.split(':').map(Number); return p[0]*3600+p[1]*60+p[2]; }
-  // Formata segundos totais para HH:MM:SS
   function formatHHMMSS(secs){
-    if (isNaN(secs) || secs < 0) return "00:00:00"; // Lida com valores inválidos
+    if (isNaN(secs) || secs < 0) return "00:00:00";
     return [Math.floor(secs/3600),Math.floor((secs%3600)/60),secs%60].map(pad).join(':');
   }
 
-  // Atualiza a qualidade do WiFi periodicamente
   function updateWifiQuality() {
     fetch('/rssi')
       .then(res => res.json())
@@ -353,10 +414,9 @@ const char htmlPage[] PROGMEM = R"rawliteral(
         document.getElementById('wifiQuality').textContent = 'Wi-Fi: --%';
       });
   }
-  setInterval(updateWifiQuality, 5000); // A cada 5 segundos
-  updateWifiQuality(); // Chamada inicial
+  setInterval(updateWifiQuality, 5000);
+  updateWifiQuality();
 
-  // Atualiza a hora atual periodicamente
   function updateCurrentTime() {
     fetch('/time')
         .then(res => res.text())
@@ -367,77 +427,71 @@ const char htmlPage[] PROGMEM = R"rawliteral(
             document.getElementById('currentTime').textContent = '--:--:--';
         });
   }
-  setInterval(updateCurrentTime, 1000); // A cada 1 segundo
-  updateCurrentTime(); // Chamada inicial
+  setInterval(updateCurrentTime, 1000);
+  updateCurrentTime();
 
-  // Carrega agendamentos e duração manual dos placeholders
   let schedules = [], manualIntervalSecs = parseHHMMSS_to_secs("%MANUAL%");
-  const rawSch = "%SCHEDULES%"; // Placeholder para agendamentos
+  const rawSch = "%SCHEDULES%";
   if(rawSch) schedules = rawSch.split(',').map(t=>{const a=t.split('|');return{time:a[0],interval:a[1]};});
 
-  // Renderiza a lista de agendamentos na UI
   function renderSchedules(){
     const ul=document.getElementById('scheduleList'); ul.innerHTML='';
     schedules.forEach((o,i)=>{
       const li=document.createElement('li');
       li.innerHTML=`<span>${o.time} (Duração: ${o.interval})</span><button class="delete" data-index="${i}">×</button>`;
-      li.querySelector('.delete').onclick=(e)=>{ // Botão de apagar agendamento
+      li.querySelector('.delete').onclick=(e)=>{
           schedules.splice(parseInt(e.target.dataset.index),1);
           renderSchedules();
-          updateNextTrigger(); // Atualiza info do próximo acionamento
+          updateNextTrigger();
       };
       ul.appendChild(li);
     });
   }
-  renderSchedules(); // Chamada inicial
+  renderSchedules();
 
-  // Adiciona um novo agendamento (localmente na UI)
   document.getElementById('addSchedule').onclick=()=>{
     const t=document.getElementById('newScheduleTime').value, i=document.getElementById('newScheduleInterval').value;
-    const rx=/^([0-9]{2}):([0-9]{2}):([0-9]{2})$/; // Regex para HH:MM:SS
+    const rx=/^([0-9]{2}):([0-9]{2}):([0-9]{2})$/;
     if(!t || !i) {showMessage('scheduleFormMessage','Preencha horário e duração','error');return;}
     if(!rx.test(t)||!rx.test(i)){showMessage('scheduleFormMessage','Use formato HH:MM:SS','error');return;}
-    if (schedules.length >= 10) { // Limite de MAX_SLOTS
+    if (schedules.length >= 10) {
         showMessage('scheduleFormMessage', 'Máximo de 10 agendamentos atingido', 'error'); return;
     }
     schedules.push({time:t,interval:i});renderSchedules();
     showMessage('scheduleFormMessage','Agendamento adicionado localmente. Clique em "Salvar Agendamentos".','success');
   };
 
-  // Salva a duração manual no servidor
-  document.getElementById('manualForm').onsubmit=e=>{
+  document.getElementById('manualDurationForm').onsubmit=e=>{ // ID do formulário atualizado
     e.preventDefault();
     const d=document.getElementById('manualInterval').value, rx=/^([0-9]{2}):([0-9]{2}):([0-9]{2})$/;
-    if(!rx.test(d)){showMessage('manualFormMessage','Use formato HH:MM:SS','error');return;}
+    if(!rx.test(d)){showMessage('manualDurationMessage','Use formato HH:MM:SS','error');return;} // ID da mensagem atualizado
     fetch('/setManualDuration',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`manualDuration=${d}`})
-      .then(r=>{if(r.ok){showMessage('manualFormMessage','Duração salva','success');manualIntervalSecs=parseHHMMSS_to_secs(d); } else {r.text().then(txt => showMessage('manualFormMessage','Erro: ' + txt,'error'));}})
-      .catch(_=>showMessage('manualFormMessage','Erro ao salvar','error'));
+      .then(r=>{if(r.ok){showMessage('manualDurationMessage','Duração salva','success');manualIntervalSecs=parseHHMMSS_to_secs(d); } else {r.text().then(txt => showMessage('manualDurationMessage','Erro: ' + txt,'error'));}})
+      .catch(_=>showMessage('manualDurationMessage','Erro ao salvar','error'));
   };
 
-  // Salva o pino do alimentador no servidor
-  document.getElementById('feederPinForm').onsubmit = e => {
+  document.getElementById('outputPinForm').onsubmit = e => { // ID do formulário atualizado
     e.preventDefault();
-    const pin = document.getElementById('feederPin').value;
+    const pin = document.getElementById('outputPinInput').value; // ID do input atualizado
     if (isNaN(parseInt(pin)) || parseInt(pin) < 0 ) {
-      showMessage('feederPinFormMessage', 'Número do pino inválido', 'error');
+      showMessage('outputPinMessage', 'Número do pino inválido', 'error'); // ID da mensagem atualizado
       return;
     }
-    fetch('/setFeederPin', {
+    fetch('/setFeederPin', { // Endpoint mantido como /setFeederPin por simplicidade no backend
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
       body: `feederPin=${pin}`
     })
     .then(r => {
       if (r.ok) {
-        showMessage('feederPinFormMessage', 'Pino do alimentador salvo. Pode ser necessário reiniciar.', 'success');
+        showMessage('outputPinMessage', 'Pino de saída salvo. Pode ser necessário reiniciar.', 'success');
       } else {
-        r.text().then(txt => showMessage('feederPinFormMessage', 'Erro: ' + txt, 'error'));
+        r.text().then(txt => showMessage('outputPinMessage', 'Erro: ' + txt, 'error'));
       }
     })
-    .catch(_ => showMessage('feederPinFormMessage', 'Erro ao salvar pino', 'error'));
+    .catch(_ => showMessage('outputPinMessage', 'Erro ao salvar pino', 'error'));
   };
 
-  // Salva todos os agendamentos no servidor
   document.getElementById('saveSchedules').onclick=()=>{
     const body='schedules='+encodeURIComponent(schedules.map(o=>`${o.time}|${o.interval}`).join(','));
     fetch('/setSchedules',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body})
@@ -445,141 +499,127 @@ const char htmlPage[] PROGMEM = R"rawliteral(
       .catch(_=>showMessage('scheduleFormMessage','Erro ao salvar','error'));
   };
 
-  // Salva as regras personalizadas no servidor
   document.getElementById('saveRules').onclick=()=>{
-    const rules=document.getElementById('customRulesInput').value; // MODIFICADO: lê do textarea
+    const rules=document.getElementById('customRulesInput').value;
     fetch('/setCustomRules',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'rules='+encodeURIComponent(rules)})
       .then(r=>{if(r.ok)showMessage('customRulesMessage','Regras salvas','success');else {r.text().then(txt => showMessage('customRulesMessage','Erro: ' + txt,'error'));}})
       .catch(_=>showMessage('customRulesMessage','Erro ao salvar','error'));
   };
 
-  // Alterna o estado das regras personalizadas (ativar/desativar)
   document.getElementById('toggleRules').onclick=()=>{
-    fetch('/toggleCustomRules',{method:'POST'})
-      .then(r=>{if(r.ok)location.reload();else {r.text().then(txt => showMessage('customRulesMessage','Erro: ' + txt,'error'));}}) // Recarrega a página para refletir o estado
-      .catch(_=>showMessage('customRulesMessage','Erro ao alternar','error'));
+    fetch('/toggleCustomRules',{method:'POST'}).then(r=>{if(r.ok)location.reload();else {r.text().then(txt => showMessage('customRulesMessage','Erro: ' + txt,'error'));}}).catch(_=>showMessage('customRulesMessage','Erro ao alternar','error'));
   };
 
-  // Botões de controle manual da alimentação
-  const manualFeedButton = document.getElementById('manualFeed');
-  const stopFeedButton = document.getElementById('stopFeed');
+  const manualActivateButton = document.getElementById('manualActivateOutput'); // ID do botão atualizado
+  const manualDeactivateButton = document.getElementById('manualDeactivateOutput'); // ID do botão atualizado
 
-  manualFeedButton.onclick = () => {
-    fetch('/feedNow', { method: 'POST' })
+  manualActivateButton.onclick = () => {
+    fetch('/feedNow', { method: 'POST' }) // Endpoint /feedNow mantido
         .then(r => {
             if (r.ok) {
-                showMessage('manualFeedMessage', 'Alimentação iniciada', 'success');
+                showMessage('manualOutputMessage', 'Saída ativada', 'success'); // ID da mensagem atualizado
             } else {
-                return r.text().then(txt => { throw new Error(txt); }); // Propaga o erro
+                return r.text().then(txt => { throw new Error(txt); });
             }
         })
-        .catch(err => showMessage('manualFeedMessage', 'Erro: ' + err.message, 'error'))
-        .finally(() => updateStatusAndRuleCountdown()); // Atualiza status independentemente do resultado
+        .catch(err => showMessage('manualOutputMessage', 'Erro: ' + err.message, 'error'))
+        .finally(() => updateStatusAndRuleCountdown());
   };
 
-  stopFeedButton.onclick = () => {
-    fetch('/stopFeedNow', { method: 'POST' })
+  manualDeactivateButton.onclick = () => {
+    fetch('/stopFeedNow', { method: 'POST' }) // Endpoint /stopFeedNow mantido
         .then(r => {
             if (r.ok) {
-                showMessage('manualFeedMessage', 'Alimentação interrompida.', 'success');
+                showMessage('manualOutputMessage', 'Saída desativada.', 'success'); // ID da mensagem atualizado
             } else {
                  return r.text().then(txt => { throw new Error(txt); });
             }
         })
-        .catch(err => showMessage('manualFeedMessage', 'Erro: ' + err.message, 'error'))
+        .catch(err => showMessage('manualOutputMessage', 'Erro: ' + err.message, 'error'))
         .finally(() => updateStatusAndRuleCountdown());
   };
 
-  let customRuleCountdownInterval = null; // Intervalo para o contador regressivo de regras custom
+  let customRuleCountdownInterval = null;
 
-  // Atualiza o status do alimentador e o contador de regras personalizadas
   function updateStatusAndRuleCountdown() {
-    fetch('/status') // Endpoint que retorna o estado atual
+    fetch('/status')
         .then(res => res.json())
         .then(data => {
-            // Atualiza botões de controle manual
-            if (data.is_feeding) {
-                stopFeedButton.style.display = 'block';
-                manualFeedButton.disabled = true;
+            if (data.is_feeding) { // is_feeding no backend representa isOutputActive
+                manualDeactivateButton.style.display = 'block';
+                manualActivateButton.disabled = true;
             } else {
-                stopFeedButton.style.display = 'none';
-                manualFeedButton.disabled = false;
+                manualDeactivateButton.style.display = 'none';
+                manualActivateButton.disabled = false;
             }
 
-            // Limpa contador anterior
             if (customRuleCountdownInterval) clearInterval(customRuleCountdownInterval);
             const ruleCountdownElement = document.getElementById('customRuleCountdown');
 
-            // Se regras customizadas estão ativas e há uma regra IH/IL com tempo restante
             if (data.custom_rules_enabled && data.active_custom_rule !== "none" && data.custom_rule_time_remaining >= 0) {
                 ruleCountdownElement.style.display = 'block';
                 let totalSeconds = data.custom_rule_time_remaining;
                 let ruleType = data.active_custom_rule;
-                // Determina se o tempo restante é para LIGADO (IH) ou DESLIGADO (IL)
                 let ruleState = ruleType === "IH" ? "LIGADO" : "DESLIGADO";
 
                 ruleCountdownElement.textContent = `Regra Ativa (${ruleType}): Tempo ${ruleState} restante: ${formatHHMMSS(totalSeconds)}`;
 
-                // Inicia um novo contador regressivo
                 customRuleCountdownInterval = setInterval(() => {
                     if (totalSeconds <= 0) {
                         clearInterval(customRuleCountdownInterval);
                         ruleCountdownElement.textContent = "Regra Ativa: Verificando...";
-                        setTimeout(updateStatusAndRuleCountdown, 1500); // Reconsulta o status
+                        setTimeout(updateStatusAndRuleCountdown, 1500);
                         return;
                     }
                     totalSeconds--;
                     ruleCountdownElement.textContent = `Regra Ativa (${ruleType}): Tempo ${ruleState} restante: ${formatHHMMSS(totalSeconds)}`;
                 }, 1000);
             } else {
-                ruleCountdownElement.style.display = 'none'; // Esconde o contador
+                ruleCountdownElement.style.display = 'none';
             }
         })
-        .catch(_ => { // Em caso de erro na consulta de status
-            stopFeedButton.style.display = 'none';
-            manualFeedButton.disabled = false;
+        .catch(_ => {
+            manualDeactivateButton.style.display = 'none';
+            manualActivateButton.disabled = false;
             if (customRuleCountdownInterval) clearInterval(customRuleCountdownInterval);
             document.getElementById('customRuleCountdown').style.display = 'none';
         });
   }
-  setInterval(updateStatusAndRuleCountdown, 2500); // Atualiza status a cada 2.5 segundos
-  updateStatusAndRuleCountdown(); // Chamada inicial
+  setInterval(updateStatusAndRuleCountdown, 2500);
+  updateStatusAndRuleCountdown();
 
-  let countdownInterval = null; // Intervalo para o contador regressivo do próximo agendamento
-  // Atualiza a informação do próximo acionamento agendado
+  let countdownInterval = null;
   function updateNextTrigger(){
     fetch('/nextTriggerTime')
         .then(res => res.text())
         .then(text => {
-            if (countdownInterval) clearInterval(countdownInterval); // Limpa contador anterior
+            if (countdownInterval) clearInterval(countdownInterval);
             const triggerElement = document.getElementById('nextTrigger');
 
-            // Tenta extrair o tempo HH:MM:SS do texto de resposta
             const match = text.match(/Próxima em: (\d{2}):(\d{2}):(\d{2})/);
             const durationMatch = text.match(/\(duração (\d{2}):(\d{2}):(\d{2})\)/);
-            let originalSuffix = ""; // Para manter o texto após o tempo (ex: duração)
+            let originalSuffix = "";
             if (durationMatch) {
                 originalSuffix = ` (duração ${durationMatch[1]}:${durationMatch[2]}:${durationMatch[3]})`;
-            } else if (match) { // Se não há match de duração, pega o que vem depois do tempo
+            } else if (match) {
                 const afterTime = text.substring(text.indexOf(match[0]) + match[0].length);
                 if (afterTime.trim().length > 0) originalSuffix = afterTime;
             }
 
-            if (match) { // Se um tempo HH:MM:SS foi encontrado
+            if (match) {
                 let hours = parseInt(match[1]);
                 let minutes = parseInt(match[2]);
                 let seconds = parseInt(match[3]);
                 let totalSeconds = hours * 3600 + minutes * 60 + seconds;
 
-                if (totalSeconds >= 0) { // Se o tempo é válido
+                if (totalSeconds >= 0) {
                     triggerElement.textContent = `Próxima em: ${pad(hours)}:${pad(minutes)}:${pad(seconds)}${originalSuffix}`;
-                    // Inicia contador regressivo
                     countdownInterval = setInterval(() => {
                         if (totalSeconds <= 0) {
                             clearInterval(countdownInterval);
                             triggerElement.textContent = "Verificando próximo agendamento...";
-                            setTimeout(updateNextTrigger, 1500); // Reconsulta
-                            updateStatusAndRuleCountdown(); // Atualiza status geral também
+                            setTimeout(updateNextTrigger, 1500);
+                            updateStatusAndRuleCountdown();
                             return;
                         }
                         totalSeconds--;
@@ -588,40 +628,38 @@ const char htmlPage[] PROGMEM = R"rawliteral(
                         const s = totalSeconds % 60;
                         triggerElement.textContent = `Próxima em: ${pad(h)}:${pad(m)}:${pad(s)}${originalSuffix}`;
                     }, 1000);
-                } else { // Tempo inválido ou já passou
+                } else {
                      triggerElement.textContent = text;
                 }
-            } else { // Nenhum tempo HH:MM:SS encontrado, mostra o texto como está
+            } else {
                  triggerElement.textContent = text;
             }
         })
-        .catch(_ => { // Erro ao buscar próximo acionamento
+        .catch(_ => {
             if (countdownInterval) clearInterval(countdownInterval);
             document.getElementById('nextTrigger').textContent = 'Erro ao buscar próximo acionamento.';
         });
   }
-  setInterval(updateNextTrigger, 30000); // Atualiza a cada 30 segundos (o contador interno é a cada 1s)
-  updateNextTrigger(); // Chamada inicial
+  setInterval(updateNextTrigger, 30000);
+  updateNextTrigger();
 
-  // Mostra uma mensagem temporária na UI
   function showMessage(id,msg,type){
     const e=document.getElementById(id);e.textContent=msg;e.className='message '+type;
-    setTimeout(()=>{e.textContent='';e.className='message';},5000); // Limpa após 5 segundos
+    setTimeout(()=>{e.textContent='';e.className='message';},5000);
   }
 
-  // Busca e exibe logs de eventos do servidor
   setInterval(() => {
     fetch('/events')
       .then(res => res.text())
       .then(txt => {
-        if (txt && txt.trim().length > 0) { // Se houver texto de log
-          const con = document.getElementById('eventConsole'); // MODIFICADO: usa eventConsole
-          const needsScroll = con.scrollHeight - con.scrollTop === con.clientHeight; // Verifica se o scroll está no fim
-          con.innerText += (con.innerText ? '\n' : '') + txt.trim(); // Adiciona o novo log
-          if(needsScroll) con.scrollTop = con.scrollHeight; // Mantém o scroll no fim se já estava
+        if (txt && txt.trim().length > 0) {
+          const con = document.getElementById('eventConsole');
+          const needsScroll = con.scrollHeight - con.scrollTop === con.clientHeight;
+          con.innerText += (con.innerText ? '\n' : '') + txt.trim();
+          if(needsScroll) con.scrollTop = con.scrollHeight;
         }
       });
-  }, 2000); // Busca logs a cada 2 segundos
+  }, 2000);
 </script>
 </body>
 </html>
@@ -634,25 +672,21 @@ const char htmlPage[] PROGMEM = R"rawliteral(
 
 // Função para sincronizar a biblioteca TimeLib com o RTC DS3231
 void syncTimeLibWithRTC() {
-  if (!rtcInitialized) { // Verifica se o RTC foi inicializado
+  if (!rtcInitialized) { 
     return;
   }
 
-  DateTime nowRTC = rtc.now(); // Lê a hora atual do RTC
-  // Verifica se o ano lido do RTC é inválido (ex: bateria do RTC falhou e resetou para um ano antigo)
-  // A condição nowRTC.year() > 1970 é para evitar problemas com unixtime = 0
-  if (nowRTC.year() < 2023 && nowRTC.year() > 1970) { // Considera anos válidos a partir de 2023
-      // Loga um aviso apenas uma vez por minuto para não inundar o serial
+  DateTime nowRTC = rtc.now(); 
+  if (nowRTC.year() < 2023 && nowRTC.year() > 1970) { 
       if (millis() % 60000 == 0) {
           Serial.printf("AVISO: RTC retornou data inválida no loop: %04d-%02d-%02d. Não sincronizando TimeLib com este valor.\n",
                         nowRTC.year(), nowRTC.month(), nowRTC.day());
       }
-      return; // Não atualiza TimeLib se a data do RTC for suspeita
+      return; 
   }
-  setTime(nowRTC.unixtime()); // Define a hora da TimeLib com base no unixtime do RTC
+  setTime(nowRTC.unixtime()); 
 }
 
-// Formata um timestamp (time_t) para uma string HH:MM (não mais usado extensivamente, preferir timeStr ou formatHHMMSS)
 String hhmmStr(const time_t &t) {
   String s;
   if (hour(t) < 10) s += '0';
@@ -662,94 +696,81 @@ String hhmmStr(const time_t &t) {
   return s;
 }
 
-// Formata uma quantidade de segundos para uma string HH:MM:SS em um buffer fornecido
 void formatHHMMSS(int secs, char *buf, size_t bufSize) {
-  secs = abs(secs); // Garante que os segundos sejam positivos para formatação
+  secs = abs(secs); 
   snprintf(buf, bufSize, "%02d:%02d:%02d",
-           secs / 3600,        // Horas
-           (secs % 3600) / 60, // Minutos
-           secs % 60);         // Segundos
+           secs / 3600,        
+           (secs % 3600) / 60, 
+           secs % 60);         
 }
 
-// Formata uma quantidade de segundos para uma string HH:MM:SS (retorna String)
 String formatHHMMSS(int secs) {
-  char buf[9]; // Buffer para "HH:MM:SS\0"
+  char buf[9]; 
   formatHHMMSS(secs, buf, sizeof(buf));
   return String(buf);
 }
 
-// Calcula o dia do ano (1-365 ou 1-366 para ano bissexto)
 int calculateDayOfYear(int y, int m, int d) {
-  int daysInMonth[] = {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}; // Dias em cada mês
-  // Verifica se é ano bissexto
+  int daysInMonth[] = {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}; 
   if ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)) {
-    daysInMonth[2] = 29; // Fevereiro tem 29 dias
+    daysInMonth[2] = 29; 
   }
   int dayOfYear = 0;
-  for (int i = 1; i < m; i++) { // Soma os dias dos meses anteriores
+  for (int i = 1; i < m; i++) { 
     dayOfYear += daysInMonth[i];
   }
-  dayOfYear += d; // Adiciona os dias do mês atual
+  dayOfYear += d; 
   return dayOfYear;
 }
 
-// Obtém o dia do ano atual
 int getCurrentDayOfYear() {
-  time_t t = now(); // Obtém o tempo atual da TimeLib
+  time_t t = now(); 
   return calculateDayOfYear(year(t), month(t), day(t));
 }
 
 
-// Obtém a hora atual em segundos desde a meia-noite
 int getCurrentTimeInSec() {
-  return hour() * 3600 + minute() * 60 + second(); // Usa funções da TimeLib
+  return hour() * 3600 + minute() * 60 + second(); 
 }
 
-// Obtém a data e hora atuais formatadas como string "YYYY-MM-DD HH:MM:SS"
 String getCurrentDateTimeString() {
-  time_t t = now(); // Obtém o tempo atual da TimeLib
-  char buf[20]; // Buffer para "YYYY-MM-DD HH:MM:SS\0"
+  time_t t = now(); 
+  char buf[20]; 
   snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
            year(t), month(t), day(t), hour(t), minute(t), second(t));
   return String(buf);
 }
 
-// Retorna uma string descrevendo o próximo acionamento agendado
 String getNextTriggerTimeString() {
-    if (customEnabled) { // Se regras personalizadas estão ativas, elas têm prioridade
+    if (customEnabled) { 
         return "Regras personalizadas ativas.";
     }
 
-    if (scheduleCount == 0) { // Se não há agendamentos
+    if (scheduleCount == 0) { 
         return "Nenhum agendamento configurado.";
     }
 
-    time_t currentTimeLib = now(); // Hora atual da TimeLib
-    // Dia do ano atual, para verificar se um agendamento já ocorreu hoje
+    time_t currentTimeLib = now(); 
     int currentDayOfYearVal = calculateDayOfYear(year(currentTimeLib), month(currentTimeLib), day(currentTimeLib));
 
-    long minNextTriggerUnixtime = -1; // Unixtime do próximo acionamento (inicializado como inválido)
-    int nextDuration = 0; // Duração do próximo acionamento
+    long minNextTriggerUnixtime = -1; 
+    int nextDuration = 0; 
 
-    // Itera sobre todos os agendamentos configurados
     for (int i = 0; i < scheduleCount; i++) {
-        // Cria um objeto DateTime para o horário do agendamento no dia de HOJE
         DateTime scheduleDateTimeToday(year(currentTimeLib), month(currentTimeLib), day(currentTimeLib),
                                        schedules[i].timeSec / 3600,
                                        (schedules[i].timeSec % 3600) / 60,
                                        schedules[i].timeSec % 60);
 
-        time_t scheduleUnixtimeToday = scheduleDateTimeToday.unixtime(); // Converte para unixtime
+        time_t scheduleUnixtimeToday = scheduleDateTimeToday.unixtime(); 
 
-        // Se o horário do agendamento para hoje já passou OU se já foi acionado hoje
         if (scheduleUnixtimeToday < currentTimeLib || schedules[i].lastTriggerDay == currentDayOfYearVal) {
-            // Considera o agendamento para o dia de AMANHÃ
-            DateTime scheduleDateTimeTomorrow = scheduleDateTimeToday + TimeSpan(1,0,0,0); // Adiciona 1 dia
+            DateTime scheduleDateTimeTomorrow = scheduleDateTimeToday + TimeSpan(1,0,0,0); 
             if (minNextTriggerUnixtime == -1 || scheduleDateTimeTomorrow.unixtime() < minNextTriggerUnixtime) {
                 minNextTriggerUnixtime = scheduleDateTimeTomorrow.unixtime();
                 nextDuration = schedules[i].durationSec;
             }
-        } else { // O agendamento para hoje ainda não ocorreu e não foi acionado hoje
+        } else { 
             if (minNextTriggerUnixtime == -1 || scheduleUnixtimeToday < minNextTriggerUnixtime) {
                 minNextTriggerUnixtime = scheduleUnixtimeToday;
                 nextDuration = schedules[i].durationSec;
@@ -757,45 +778,41 @@ String getNextTriggerTimeString() {
         }
     }
 
-    if (minNextTriggerUnixtime != -1) { // Se um próximo acionamento foi encontrado
-        time_t diffSeconds = minNextTriggerUnixtime - currentTimeLib; // Diferença em segundos até o próximo acionamento
-        if (diffSeconds < 0) diffSeconds = 0; // Garante que não seja negativo
+    if (minNextTriggerUnixtime != -1) { 
+        time_t diffSeconds = minNextTriggerUnixtime - currentTimeLib; 
+        if (diffSeconds < 0) diffSeconds = 0; 
 
-        char timeBuf[9]; // Buffer para HH:MM:SS
-        formatHHMMSS(diffSeconds, timeBuf, sizeof(timeBuf)); // Formata o tempo restante
+        char timeBuf[9]; 
+        formatHHMMSS(diffSeconds, timeBuf, sizeof(timeBuf)); 
 
-        char durationBuf[9]; // Buffer para HH:MM:SS
-        formatHHMMSS(nextDuration, durationBuf, sizeof(durationBuf)); // Formata a duração
+        char durationBuf[9]; 
+        formatHHMMSS(nextDuration, durationBuf, sizeof(durationBuf)); 
 
         return "Próxima em: " + String(timeBuf) + " (duração " + String(durationBuf) + ")";
     }
-    return "Nenhum agendamento futuro encontrado."; // Caso nenhum agendamento válido seja encontrado
+    return "Nenhum agendamento futuro encontrado."; 
 }
 
 
 // =============== Schedule Checking =============== //
-// Verifica os agendamentos padrão (não as regras personalizadas)
 void checkSchedules() {
-  if (isFeeding || customEnabled) return; // Não verifica se já está alimentando ou se regras customizadas estão ativas
+  if (isOutputActive || customEnabled) return; 
 
-  int today = getCurrentDayOfYear(); // Dia do ano atual
-  int currentTime = getCurrentTimeInSec(); // Hora atual em segundos desde meia-noite
+  int today = getCurrentDayOfYear(); 
+  int currentTime = getCurrentTimeInSec(); 
 
   for (int i = 0; i < scheduleCount; i++) {
     Schedule &s = schedules[i];
-    // Verifica se é o horário do agendamento e se ainda não foi acionado hoje
     if (currentTime == s.timeSec && s.lastTriggerDay != today) {
-      // Verifica o cooldown para evitar acionamentos repetidos muito rapidamente
       if (millis() - lastTriggerMs >= FEED_COOLDOWN * 1000UL || lastTriggerMs == 0) {
-        s.lastTriggerDay = today; // Marca como acionado hoje
-        // Log da intenção da regra de agendamento
-        String logRuleIntent = timeStr(now()) + " -> Agendamento #" + String(i) + " (" + formatHHMMSS(s.timeSec) + ") detectado para LIGAR.";
+        s.lastTriggerDay = today; 
+        String logRuleIntent = timeStr(now()) + " -> Agendamento #" + String(i) + " (" + formatHHMMSS(s.timeSec) + ") detectado para LIGAR SAÍDA.";
         Serial.println(logRuleIntent);
         eventLog += logRuleIntent + "\n";
 
-        startFeeding(s.durationSec); // Inicia a alimentação
+        startOutput(s.durationSec); 
 
-        saveConfig(); // Salva o estado (lastTriggerDay)
+        saveConfig(); 
       } else {
          String logMsg = getCurrentDateTimeString() + " -> Agendamento #" + String(i) + " ignorado (cooldown)";
          Serial.println(logMsg);
@@ -805,108 +822,84 @@ void checkSchedules() {
   }
 }
 
-// Converte uma string "YYYY-MM-DD HH:MM" para time_t
 time_t parseDateTime(const String &s) {
-  struct tm tm_struct; // Estrutura para armazenar data/hora
-  // Tenta parsear a string
+  struct tm tm_struct; 
   if (sscanf(s.c_str(), " %4d-%2d-%2d %2d:%2d",
              &tm_struct.tm_year, &tm_struct.tm_mon, &tm_struct.tm_mday,
              &tm_struct.tm_hour, &tm_struct.tm_min)
-      == 5) { // Se 5 campos foram lidos com sucesso
-    tm_struct.tm_year -= 1900; // Ano é desde 1900
-    tm_struct.tm_mon -= 1;    // Mês é 0-11
-    tm_struct.tm_sec = 0;     // Segundos não são parseados, define como 0
-    tm_struct.tm_isdst = -1;  // Deixa a libc determinar se é horário de verão
-    return mktime(&tm_struct); // Converte para time_t
+      == 5) { 
+    tm_struct.tm_year -= 1900; 
+    tm_struct.tm_mon -= 1;    
+    tm_struct.tm_sec = 0;     
+    tm_struct.tm_isdst = -1;  
+    return mktime(&tm_struct); 
   }
-  return (time_t)0; // Retorna 0 em caso de erro
+  return (time_t)0; 
 }
 
-// Converte uma string "HH:MM:SS" para segundos desde a meia-noite
 int parseHHMMSS(const String &s) {
   int h = 0, m = 0, sec = 0;
-  // Tenta parsear a string
-  if (sscanf(s.c_str(), "%d:%d:%d", &h, &m, &sec) == 3) { // Se 3 campos foram lidos
-    // Valida os ranges
+  if (sscanf(s.c_str(), "%d:%d:%d", &h, &m, &sec) == 3) { 
     if (h >= 0 && h < 24 && m >= 0 && m < 60 && sec >= 0 && sec < 60) {
-        return h * 3600 + m * 60 + sec; // Retorna segundos totais
+        return h * 3600 + m * 60 + sec; 
     }
   }
-  return -1; // Retorna -1 se inválido ou erro de parse
+  return -1; 
 }
 
-// Parseia o tempo de uma regra IH ou IL (formato HH:MM:SS) de uma string de regras
 int parseRuleTime(const String& rulePrefix, const String& rules) {
-    int rulePos = rules.indexOf(rulePrefix); // Encontra a posição do prefixo (ex: "IH")
+    int rulePos = rules.indexOf(rulePrefix); 
     if (rulePos != -1) {
-        // Extrai a substring do tempo (ex: "00:00:30" de "IH00:00:30")
-        // rulePrefix.length() é 2 para "IH" ou "IL"
-        // HH:MM:SS é 8 caracteres
         String timeStrVal = rules.substring(rulePos + rulePrefix.length(), rulePos + rulePrefix.length() + 8);
-        int h = 0, m = 0, s_val = 0; // Renomeado 's' para 's_val' para evitar conflito com parâmetro da função externa se houvesse
-        if (sscanf(timeStrVal.c_str(), "%d:%d:%d", &h, &m, &s_val) == 3) { // Parseia HH:MM:SS
-            // Valida os ranges
+        int h = 0, m = 0, s_val = 0; 
+        if (sscanf(timeStrVal.c_str(), "%d:%d:%d", &h, &m, &s_val) == 3) { 
             if (h >= 0 && h < 24 && m >= 0 && m < 60 && s_val >= 0 && s_val < 60) {
-                return h * 3600 + m * 60 + s_val; // Retorna em segundos
+                return h * 3600 + m * 60 + s_val; 
             }
         }
     }
-    return -1; // Retorna -1 se não encontrado ou erro de parse
+    return -1; 
 }
 
 
-// Verifica e processa as regras personalizadas (customSchedule)
 String scheduleChk(const String &schedule, const byte &pin) {
-  String event = "";    // Evento que causou a ação (para log)
-  byte relay_val;       // Valor desejado para o relé (HIGH ou LOW)
-  static time_t lastCheck = 0; // Para evitar checagens muito frequentes (a cada segundo no máximo)
+  String event = "";    
+  byte relay_val;       
+  static time_t lastCheck = 0; 
 
-  // String para data/hora atual formatada
   String dt_str = "";
-  String s_temp = ""; // String temporária para construir padrões de regra (renomeada de 's')
-  String timeOnlyStr = ""; // String para HH:MM
-  String dayOfWeekStr = ""; // String para DiaDaSemana HH:MM
+  String s_temp = ""; 
+  String timeOnlyStr = ""; 
+  String dayOfWeekStr = ""; 
 
-  if (schedule == "") { // Se não há regras personalizadas, não faz nada
+  if (schedule == "") { 
     return "";
   }
 
-  time_t currentTime = now(); // Hora atual
+  time_t currentTime = now(); 
 
-  // Limita a frequência de checagem para evitar sobrecarga (ex: a cada 1 segundo)
-  if (currentTime - lastCheck < 1 && lastCheck != 0) return ""; // lastCheck!=0 para permitir a primeira execução
+  if (currentTime - lastCheck < 1 && lastCheck != 0) return ""; 
   lastCheck = currentTime;
 
-  // Formata a data e hora atual para "YYYY-MM-DD HH:MM" (minutos são a menor granularidade para estas regras)
   char currentDtStr[17];
   sprintf(currentDtStr, "%04d-%02d-%02d %02d:%02d",
           year(currentTime), month(currentTime), day(currentTime),
           hour(currentTime), minute(currentTime));
   dt_str = String(currentDtStr);
 
-  // --- Verificação de regras baseadas em data/hora específica ---
-  // SHYYYY-MM-DD HH:MM (Specific High)
   s_temp = "SH" + dt_str;
   if (schedule.indexOf(s_temp) != -1) { event = s_temp; relay_val = HIGH; goto P_scheduleChk_Action; }
-  // SLYYYY-MM-DD HH:MM (Specific Low)
   s_temp = "SL" + dt_str;
   if (schedule.indexOf(s_temp) != -1) { event = s_temp; relay_val = LOW; goto P_scheduleChk_Action; }
 
-  timeOnlyStr = dt_str.substring(11); // Extrai "HH:MM"
+  timeOnlyStr = dt_str.substring(11); 
 
-  // --- Verificação de regras baseadas em hora do dia (Diário) ---
-  // DHMM:HH (Daily High)
   s_temp = "DH" + timeOnlyStr;
   if (schedule.indexOf(s_temp) != -1) { event = s_temp; relay_val = HIGH; goto P_scheduleChk_Action; }
-  // DLMM:HH (Daily Low)
   s_temp = "DL" + timeOnlyStr;
   if (schedule.indexOf(s_temp) != -1) { event = s_temp; relay_val = LOW; goto P_scheduleChk_Action; }
 
-  // --- Verificação de regras baseadas em dia da semana e hora ---
-  // weekday() retorna 1 para Domingo, ..., 7 para Sábado (TimeLib)
-  // WHw HH:MM (Weekly High - w é dia da semana)
-  // WLw HH:MM (Weekly Low - w é dia da semana)
-  dayOfWeekStr = String(weekday(currentTime)) + " " + timeOnlyStr; // Ex: "2 08:30" para Segunda 08:30
+  dayOfWeekStr = String(weekday(currentTime)) + " " + timeOnlyStr; 
 
   s_temp = "WH" + dayOfWeekStr;
   if (schedule.indexOf(s_temp) != -1) { event = s_temp; relay_val = HIGH; goto P_scheduleChk_Action; }
@@ -914,90 +907,75 @@ String scheduleChk(const String &schedule, const byte &pin) {
   if (schedule.indexOf(s_temp) != -1) { event = s_temp; relay_val = LOW; goto P_scheduleChk_Action; }
 
 
-  // --- Verificação de regras de Intervalo (IH/IL) ---
-  // Estas regras dependem de `currentTime` (que tem precisão de segundos) e dos timers `ruleHighDT`/`ruleLowDT`.
-  // IH (Interval High): Se o pino está HIGH, desliga após um intervalo.
-  if (digitalRead(pin) == HIGH && ruleHighDT != 0) { // Se pino está LIGADO e ruleHighDT foi definido
-    int ihTime = parseRuleTime("IH", schedule); // Parseia o tempo de IH (ex: "IH00:00:30")
-    if (ihTime != -1 && (currentTime - ruleHighDT >= ihTime)) { // Se regra IH existe e o tempo passou
+  if (digitalRead(pin) == HIGH && ruleHighDT != 0) { 
+    int ihTime = parseRuleTime("IH", schedule); 
+    if (ihTime != -1 && (currentTime - ruleHighDT >= ihTime)) { 
       event = "IH" + formatHHMMSS(ihTime);
-      relay_val = LOW; // Ação: DESLIGAR
+      relay_val = LOW; 
       goto P_scheduleChk_Action;
     }
   }
-  // IL (Interval Low): Se o pino está LOW, liga após um intervalo.
-  if (digitalRead(pin) == LOW && ruleLowDT != 0) { // Se pino está DESLIGADO e ruleLowDT foi definido
-    int ilTime = parseRuleTime("IL", schedule); // Parseia o tempo de IL (ex: "IL00:00:30")
-    if (ilTime != -1 && (currentTime - ruleLowDT >= ilTime)) { // Se regra IL existe e o tempo passou
+  if (digitalRead(pin) == LOW && ruleLowDT != 0) { 
+    int ilTime = parseRuleTime("IL", schedule); 
+    if (ilTime != -1 && (currentTime - ruleLowDT >= ilTime)) { 
       event = "IL" + formatHHMMSS(ilTime);
-      relay_val = HIGH; // Ação: LIGAR
+      relay_val = HIGH; 
       goto P_scheduleChk_Action;
     }
   }
 
-P_scheduleChk_Action: // Ponto de ação para todas as regras
-  if (event != "" && relay_val != digitalRead(pin)) { // Se um evento foi definido E o estado desejado é diferente do atual
-    // Log da intenção da regra
-    String logRuleIntent = timeStr(currentTime) + " -> Regra " + event + " detectada para " + (relay_val == HIGH ? "LIGAR" : "DESLIGAR") + ".";
+P_scheduleChk_Action: 
+  if (event != "" && relay_val != digitalRead(pin)) { 
+    String logRuleIntent = timeStr(currentTime) + " -> Regra " + event + " detectada para " + (relay_val == HIGH ? "LIGAR SAÍDA" : "DESLIGAR SAÍDA") + ".";
     Serial.println(logRuleIntent);
     eventLog += logRuleIntent + "\n";
 
-    if (relay_val == HIGH) { // Se a ação é LIGAR
-      unsigned long durationToFeedSec = MAX_FEED_DURATION + 1; // Duração padrão: "até outra regra desligar" ou IH
-      int ihTime = parseRuleTime("IH", customSchedule); // Verifica se há uma regra IH para limitar a duração
-      if (ihTime != -1 && ihTime > 0) { // Se IH existe e é maior que 0
-        durationToFeedSec = ihTime; // A duração será o tempo de IH
+    if (relay_val == HIGH) { 
+      unsigned long durationToFeedSec = MAX_FEED_DURATION + 1; 
+      int ihTime = parseRuleTime("IH", customSchedule); 
+      if (ihTime != -1 && ihTime > 0) { 
+        durationToFeedSec = ihTime; 
       }
-      // Se ihTime for 0 ou -1, durationToFeedSec permanece MAX_FEED_DURATION + 1,
-      // o que significa que ficará ligado até outra regra (DL, WL, SL, IH válida) o desligar, ou manualmente.
-      startFeeding(durationToFeedSec); // Inicia a alimentação
-    } else { // relay_val == LOW, a ação é DESLIGAR
-      stopFeeding(); // Para a alimentação
+      startOutput(durationToFeedSec); 
+    } else { 
+      stopOutput(); 
     }
-    return event; // Retorna o evento que causou a ação
+    return event; 
   }
-  return ""; // Nenhuma regra acionada ou pino já no estado desejado
+  return ""; 
 }
 
 
 // =============== Web Server Handlers =============== //
-// Retorna informações de RSSI do WiFi em JSON
 void handleRssi() {
   int rssi = WiFi.RSSI();
-  int pct  = map(constrain(rssi, -90, -30), -90, -30, 0, 100); // Mapeia RSSI para porcentagem (0-100)
+  int pct  = map(constrain(rssi, -90, -30), -90, -30, 0, 100); 
   String json = String("{\"rssi\":") + rssi + ",\"pct\":" + pct + "}";
   server.send(200, "application/json", json);
 }
 
-// Retorna a hora atual formatada
 void handleTime() {
     server.send(200, "text/plain", timeStr(now()));
 }
 
-// Retorna a string do próximo acionamento
 void handleNextTriggerTime() {
     server.send(200, "text/plain", getNextTriggerTimeString());
 }
 
-// Define o pino GPIO para o alimentador
-void handleSetFeederPin() {
-  if (!server.hasArg("feederPin")) {
+void handleSetOutputPin() { // Renomeado de handleSetFeederPin
+  if (!server.hasArg("feederPin")) { // Parâmetro mantido como 'feederPin' para compatibilidade com JS existente
     server.send(400, "text/plain", "Parâmetro 'feederPin' ausente");
     return;
   }
   int newPin = server.arg("feederPin").toInt();
 
-  // Validação básica do pino
   bool isValidConfigPin = true;
 #if defined(ESP8266)
   if (newPin < 0 || newPin > 16) isValidConfigPin = false;
-  if (newPin == 1 || newPin == 3) isValidConfigPin = false; // TX, RX (Serial)
-  // GPIO 0, 2, 15 são usados para boot. Cuidado.
-  // GPIO 4, 5 são SCL, SDA padrão para I2C.
+  if (newPin == 1 || newPin == 3) isValidConfigPin = false; 
 #elif defined(ESP32)
   if (newPin < 0 || newPin > 39) isValidConfigPin = false;
-  if (newPin >=34 && newPin <=39) isValidConfigPin = false; // Pinos apenas de entrada
-  // GPIO 6-11 são usados pela flash SPI.
+  if (newPin >=34 && newPin <=39) isValidConfigPin = false; 
 #endif
 
   if (!isValidConfigPin) {
@@ -1006,49 +984,47 @@ void handleSetFeederPin() {
   }
 
   if (newPin != currentFeederPin) {
-    // Se estiver a alimentar, para antes de mudar o pino
-    if(isFeeding) {
-        stopFeeding();
-        String logPinChange = timeStr(now()) + " -> Alimentação interrompida devido à mudança de pino.";
+    if(isOutputActive) { 
+        stopOutput();
+        String logPinChange = timeStr(now()) + " -> Saída desativada devido à mudança de pino.";
         Serial.println(logPinChange);
         eventLog += logPinChange + "\n";
     }
     currentFeederPin = newPin;
-    pinMode(currentFeederPin, OUTPUT);    // Define o novo pino como saída
-    digitalWrite(currentFeederPin, LOW);  // Garante que comece desligado
-    Serial.printf("Pino do alimentador alterado para GPIO: %d\n", currentFeederPin);
+    pinMode(currentFeederPin, OUTPUT);
+    digitalWrite(currentFeederPin, LOW);
+    Serial.printf("Pino de Saída alterado para GPIO: %d\n", currentFeederPin);
   }
 
-  saveConfig(); // Salva a nova configuração
+  saveConfig();
 
-  String logMsg = timeStr(now()) + " -> Pino do alimentador definido para GPIO " + String(currentFeederPin);
+  String logMsg = timeStr(now()) + " -> Pino de Saída definido para GPIO " + String(currentFeederPin);
   eventLog += logMsg + "\n";
   Serial.println(logMsg);
 
-  server.send(200, "text/plain", "Pino do alimentador salvo.");
+  server.send(200, "text/plain", "Pino de Saída salvo.");
 }
 
-// Retorna o status atual do alimentador e regras personalizadas em JSON
 void handleStatus() {
-  DynamicJsonDocument doc(256); // JSON para a resposta
-  doc["is_feeding"] = isFeeding;
+  DynamicJsonDocument doc(256);
+  doc["is_feeding"] = isOutputActive; // 'is_feeding' no JSON representa isOutputActive
   doc["custom_rules_enabled"] = customEnabled;
 
-  String activeRule = "none"; // Regra ativa ("IH", "IL", ou "none")
-  long timeRemaining = -1;    // Tempo restante para a regra ativa em segundos
+  String activeRule = "none";
+  long timeRemaining = -1;
 
   if (customEnabled) {
     time_t currentTime = now();
-    if (isFeeding && ruleHighDT != 0) { // Se está alimentando e ruleHighDT está setado (timing IH)
+    if (isOutputActive && ruleHighDT != 0) {
       int ihTimeSec = parseRuleTime("IH", customSchedule);
-      if (ihTimeSec != -1 && ihTimeSec > 0) { // Considera IH > 0
+      if (ihTimeSec != -1 && ihTimeSec > 0) {
         activeRule = "IH";
         timeRemaining = ihTimeSec - (currentTime - ruleHighDT);
         if (timeRemaining < 0) timeRemaining = 0;
       }
-    } else if (!isFeeding && ruleLowDT != 0) { // Se não está alimentando e ruleLowDT está setado (timing IL)
+    } else if (!isOutputActive && ruleLowDT != 0) {
       int ilTimeSec = parseRuleTime("IL", customSchedule);
-      if (ilTimeSec != -1 && ilTimeSec > 0) { // Considera IL > 0
+      if (ilTimeSec != -1 && ilTimeSec > 0) {
         activeRule = "IL";
         timeRemaining = ilTimeSec - (currentTime - ruleLowDT);
         if (timeRemaining < 0) timeRemaining = 0;
@@ -1064,31 +1040,28 @@ void handleStatus() {
   server.send(200, "application/json", jsonResponse);
 }
 
-// Para a alimentação manualmente via web
-void handleStopFeedNow() {
-  if (isFeeding) {
-    String logIntent = timeStr(now()) + " -> Comando /stopFeedNow (web) recebido.";
+void handleDeactivateOutputNow() { // Renomeado de handleStopFeedNow
+  if (isOutputActive) { 
+    String logIntent = timeStr(now()) + " -> Comando manual (web) recebido para DESATIVAR SAÍDA.";
     Serial.println(logIntent); eventLog += logIntent + "\n";
-    stopFeeding();
-    server.send(200, "text/plain", "Alimentação interrompida.");
+    stopOutput();
+    server.send(200, "text/plain", "Saída desativada.");
   } else {
-    server.send(400, "text/plain", "Nenhuma alimentação ativa para interromper.");
+    server.send(400, "text/plain", "Nenhuma saída ativa para desativar.");
   }
 }
 
 
-// Handler para a página principal HTML
 void handleRoot() {
-  String page = FPSTR(htmlPage); // Carrega o HTML da PROGMEM
+  String page = FPSTR(htmlPage);
   int rssi    = WiFi.RSSI();
-  int quality = map(constrain(rssi, -90, -30), -90, -30, 0, 100); // Qualidade do WiFi
+  int quality = map(constrain(rssi, -90, -30), -90, -30, 0, 100);
 
-  // Substitui os placeholders no HTML com os valores atuais
   page.replace("%MANUAL%", formatHHMMSS(manualDurationSec));
   page.replace("%WIFI_QUALITY%", String(quality));
-  page.replace("%FEEDER_PIN_VALUE%", String(currentFeederPin));
+  page.replace("%OUTPUT_PIN_VALUE%", String(currentFeederPin)); // Placeholder atualizado
 
-  String scheduleList_str; // String para a lista de agendamentos (renomeada de scheduleList)
+  String scheduleList_str;
   for (int i = 0; i < scheduleCount; i++) {
     if (i > 0) scheduleList_str += ",";
     scheduleList_str += formatHHMMSS(schedules[i].timeSec);
@@ -1096,45 +1069,40 @@ void handleRoot() {
     scheduleList_str += formatHHMMSS(schedules[i].durationSec);
   }
   page.replace("%SCHEDULES%", scheduleList_str);
-  page.replace("%CUSTOM_RULES%", customSchedule); // Preenche o textarea com as regras atuais
+  page.replace("%CUSTOM_RULES%", customSchedule);
   page.replace("%TOGGLE_BUTTON%", customEnabled ? "Desativar Regras" : "Ativar Regras");
-  page.replace("%STATUS_CLASS%", isFeeding ? "feeding" : (WiFi.status() == WL_CONNECTED ? "active" : ""));
+  page.replace("%STATUS_CLASS%", isOutputActive ? "feeding" : (WiFi.status() == WL_CONNECTED ? "active" : "")); 
 
-  server.send(200, "text/html", page); // Envia a página
+  server.send(200, "text/html", page);
 }
 
-// Inicia a alimentação manualmente via web
-void handleFeedNow() {
+void handleActivateOutputNow() { // Renomeado de handleFeedNow
   unsigned long current_millis = millis();
 
-  if (isFeeding) {
-    server.send(409, "text/plain", "Já está alimentando");
+  if (isOutputActive) { 
+    server.send(409, "text/plain", "Saída já está ativa");
     return;
   }
   if (current_millis - lastTriggerMs < FEED_COOLDOWN * 1000UL && lastTriggerMs != 0) {
-    server.send(429, "text/plain", "Aguarde o intervalo (" + String(FEED_COOLDOWN) + "s) entre alimentações");
+    server.send(429, "text/plain", "Aguarde o intervalo (" + String(FEED_COOLDOWN) + "s) entre ativações");
     return;
   }
 
-  String logIntent = timeStr(now()) + " -> Comando /feedNow (web manual) recebido.";
+  String logIntent = timeStr(now()) + " -> Comando manual (web) recebido para ATIVAR SAÍDA.";
   Serial.println(logIntent); eventLog += logIntent + "\n";
 
-  unsigned long durationToFeed = manualDurationSec;
-  // Se regras customizadas estão ativas, startFeeding irá considerar a regra IH, se houver,
-  // para limitar a duração manual, se IH for menor.
-  startFeeding(durationToFeed);
-  server.send(200, "text/plain", "Alimentação iniciada");
+  startOutput(manualDurationSec);
+  server.send(200, "text/plain", "Saída ativada");
 }
 
 
-// Define a duração manual da alimentação
 void handleSetManualDuration() {
   if (! server.hasArg("manualDuration")) {
     server.send(400, "text/plain", "Parâmetro 'manualDuration' ausente");
     return;
   }
 
-  String duration_str = server.arg("manualDuration"); // Renomeada de 'duration'
+  String duration_str = server.arg("manualDuration");
   int secs = parseHHMMSS(duration_str);
 
   if (secs <= 0 || secs > MAX_FEED_DURATION) {
@@ -1146,7 +1114,7 @@ void handleSetManualDuration() {
   saveConfig();
 
   String ts = timeStr(now());
-  String ev = ts + " -> Duração manual definida para " + duration_str;
+  String ev = ts + " -> Duração manual de ativação definida para " + duration_str;
   eventLog += ev + "\n";
   Serial.println(ev);
 
@@ -1154,14 +1122,13 @@ void handleSetManualDuration() {
 }
 
 
-// Define os agendamentos
 void handleSetSchedules() {
   if (server.hasArg("schedules")) {
-    String scheduleStr_arg = server.arg("schedules"); // Renomeada de scheduleStr
+    String scheduleStr_arg = server.arg("schedules");
 
     scheduleCount = 0;
     for(int k=0; k < MAX_SLOTS; ++k) {
-        schedules[k].lastTriggerDay = -1; // Limpa lastTriggerDay para todos os slots
+        schedules[k].lastTriggerDay = -1;
     }
 
     if (scheduleStr_arg.length() > 0) {
@@ -1174,11 +1141,11 @@ void handleSetSchedules() {
         int pipePos = token.indexOf('|');
 
         if (pipePos > 0) {
-          int timeSec_val = parseHHMMSS(token.substring(0, pipePos)); // Renomeada de timeSec
-          int durationSec_val = parseHHMMSS(token.substring(pipePos + 1)); // Renomeada de durationSec
+          int timeSec_val = parseHHMMSS(token.substring(0, pipePos));
+          int durationSec_val = parseHHMMSS(token.substring(pipePos + 1));
 
           if (timeSec_val >= 0 && durationSec_val > 0 && durationSec_val <= MAX_FEED_DURATION) {
-            schedules[scheduleCount] = { timeSec_val, durationSec_val, -1 }; // lastTriggerDay é resetado
+            schedules[scheduleCount] = { timeSec_val, durationSec_val, -1 };
             scheduleCount++;
           } else {
              Serial.println("Agendamento inválido descartado: " + token);
@@ -1200,7 +1167,6 @@ void handleSetSchedules() {
   }
 }
 
-// Define as regras personalizadas
 void handleSetCustomRules() {
   if (!server.hasArg("rules")) {
     server.send(400, "text/plain", "Parâmetro 'rules' ausente");
@@ -1217,7 +1183,7 @@ void handleSetCustomRules() {
   strncpy(customSchedule, newRules.c_str(), sizeof(customSchedule) - 1);
   customSchedule[sizeof(customSchedule) - 1] = '\0';
 
-  saveConfig(); // Salva o novo customSchedule e o estado customEnabled existente.
+  saveConfig();
 
   time_t t_now = now();
   String current_ts_log = timeStr(t_now);
@@ -1227,13 +1193,13 @@ void handleSetCustomRules() {
     if (digitalRead(currentFeederPin) == LOW) {
       ruleLowDT = t_now;
       ruleHighDT = 0;
-      String logMsgDetail = log_prefix_rules_saved + " (regras ATIVADAS). Dispositivo DESLIGADO. (Re)iniciando contagem IL.";
+      String logMsgDetail = log_prefix_rules_saved + " (regras ATIVADAS). Saída DESLIGADA. (Re)iniciando contagem IL.";
       Serial.println(logMsgDetail);
       eventLog += logMsgDetail + "\n";
     } else {
       ruleHighDT = t_now;
       ruleLowDT = 0;
-      String logMsgDetail = log_prefix_rules_saved + " (regras ATIVADAS). Dispositivo LIGADO. (Re)iniciando contagem IH.";
+      String logMsgDetail = log_prefix_rules_saved + " (regras ATIVADAS). Saída LIGADA. (Re)iniciando contagem IH.";
       Serial.println(logMsgDetail);
       eventLog += logMsgDetail + "\n";
     }
@@ -1251,9 +1217,8 @@ void handleSetCustomRules() {
 }
 
 
-static bool notifiedStart = false; // Flag para log de início de contagem de regras customizadas no loop
+static bool notifiedStart = false;
 
-// Alterna o estado das regras personalizadas (ativado/desativado)
 void handleToggleCustomRules() {
   customEnabled = !customEnabled;
   saveConfig();
@@ -1269,19 +1234,18 @@ void handleToggleCustomRules() {
     if (digitalRead(currentFeederPin) == LOW) {
       ruleLowDT = t_now;
       ruleHighDT = 0;
-      String logMsg = current_ts_log + " -> Regras avançadas ATIVADAS. Dispositivo DESLIGADO. Iniciando contagem para IL (se houver).";
+      String logMsg = current_ts_log + " -> Regras avançadas ATIVADAS. Saída DESLIGADA. Iniciando contagem para IL (se houver).";
       Serial.println(logMsg);
       eventLog += logMsg + "\n";
     } else {
       ruleHighDT = t_now;
       ruleLowDT = 0;
-      String logMsg = current_ts_log + " -> Regras avançadas ATIVADAS. Dispositivo LIGADO. Iniciando contagem para IH (se houver).";
+      String logMsg = current_ts_log + " -> Regras avançadas ATIVADAS. Saída LIGADA. Iniciando contagem para IH (se houver).";
       Serial.println(logMsg);
       eventLog += logMsg + "\n";
     }
-    notifiedStart = false; // Permite log de "contagem iniciada" no loop
+    notifiedStart = false;
   } else {
-    // Ao desativar, zera os timers para evitar que um valor antigo seja usado se reativado
     ruleHighDT = 0;
     ruleLowDT = 0;
     String logMsg = current_ts_log + " -> Regras avançadas DESATIVADAS. Timers IH/IL zerados.";
@@ -1292,7 +1256,6 @@ void handleToggleCustomRules() {
 
 // =============== Configuration Management =============== //
 
-// Carrega a configuração do arquivo JSON no LittleFS/SPIFFS
 void loadConfig() {
   Serial.println("Mounting filesystem...");
 
@@ -1311,7 +1274,7 @@ void loadConfig() {
     }
   }
 #else // ESP32
-  if (!FS.begin(true)) { // true para formatar se a montagem falhar
+  if (!FS.begin(true)) {
     Serial.println("SPIFFS mount failed, rebooting...");
     ESP.restart();
   }
@@ -1320,7 +1283,7 @@ void loadConfig() {
   if (!FS.exists(CONFIG_PATH)) {
     Serial.println("No config file found, using defaults and creating one.");
     currentFeederPin = defaultFeederPin;
-    manualDurationSec = 5; // Default
+    manualDurationSec = 5;
     customSchedule[0] = '\0';
     customEnabled = false;
     scheduleCount = 0;
@@ -1332,11 +1295,10 @@ void loadConfig() {
   if (!file) {
     Serial.println("Failed to open config file for reading. Using defaults.");
     currentFeederPin = defaultFeederPin;
-    // Outros defaults já estão definidos globalmente ou serão aplicados abaixo
     return;
   }
 
-  DynamicJsonDocument doc(2048); // Aumentado para segurança
+  DynamicJsonDocument doc(2048);
   DeserializationError err = deserializeJson(doc, file);
   file.close();
   if (err) {
@@ -1354,9 +1316,9 @@ void loadConfig() {
   }
 
   currentFeederPin = doc["feederPin"] | defaultFeederPin;
-  manualDurationSec = doc["manualDuration"] | 5; // Default 5s
+  manualDurationSec = doc["manualDuration"] | 5;
 
-  const char *rules_ptr = doc["customSchedule"]; // Renomeado de 'rules'
+  const char *rules_ptr = doc["customSchedule"];
   if (rules_ptr) {
     strncpy(customSchedule, rules_ptr, sizeof(customSchedule) -1);
     customSchedule[sizeof(customSchedule) -1] = '\0';
@@ -1378,24 +1340,23 @@ void loadConfig() {
   }
 
   Serial.println("Configuration loaded:");
-  Serial.printf(" • Feeder Pin: GPIO %d\n", currentFeederPin);
-  Serial.printf(" • Manual duration: %s\n", formatHHMMSS(manualDurationSec).c_str());
-  Serial.printf(" • %d schedules:\n", scheduleCount);
+  Serial.printf(" • Pino de Saída: GPIO %d\n", currentFeederPin);
+  Serial.printf(" • Duração manual de ativação: %s\n", formatHHMMSS(manualDurationSec).c_str());
+  Serial.printf(" • %d agendamentos:\n", scheduleCount);
   for (int i = 0; i < scheduleCount; i++) {
     char timeBuf[9], durationBuf[9];
     formatHHMMSS(schedules[i].timeSec, timeBuf, sizeof(timeBuf));
     formatHHMMSS(schedules[i].durationSec, durationBuf, sizeof(durationBuf));
-    Serial.printf("    – %s for %s (Last triggered day: %d)\n",
+    Serial.printf("    – %s por %s (Último dia acionado: %d)\n",
                   timeBuf, durationBuf, schedules[i].lastTriggerDay);
   }
-  Serial.printf(" • Custom rules: \"%s\" (%s)\n",
+  Serial.printf(" • Regras personalizadas: \"%s\" (%s)\n",
                 customSchedule,
                 customEnabled ? "enabled" : "disabled");
 }
 
-// Salva a configuração atual no arquivo JSON
 void saveConfig() {
-  DynamicJsonDocument doc(2048); // Aumentado para segurança
+  DynamicJsonDocument doc(2048);
   doc["feederPin"] = currentFeederPin;
   doc["manualDuration"] = manualDurationSec;
   doc["customSchedule"] = customSchedule;
@@ -1423,35 +1384,33 @@ void saveConfig() {
 
 
 // =============== Hardware Control =============== //
-// Configura os pinos de hardware
 void setupHardware() {
   pinMode(currentFeederPin, OUTPUT);
-  digitalWrite(currentFeederPin, LOW); // Garante que comece desligado
+  digitalWrite(currentFeederPin, LOW);
 
   pinMode(STATUS_LED_PIN, OUTPUT);
-  digitalWrite(STATUS_LED_PIN, HIGH); // LED desligado (LOW acende para LED_BUILTIN comum)
+  digitalWrite(STATUS_LED_PIN, HIGH);
 
   #ifdef SONOFF_BASIC
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   #endif
 }
 
-// Atualiza o LED de status para indicar o estado do dispositivo
 void updateStatusLED() {
   static unsigned long lastBlink = 0;
   static bool ledState = false;
   unsigned long current_millis = millis();
 
-  if (isFeeding) { // Alimentando: pisca rapidamente (ex: a cada 200ms)
+  if (isOutputActive) { 
     if (current_millis - lastBlink > 200) {
       ledState = !ledState;
-      digitalWrite(STATUS_LED_PIN, ledState ? LOW : HIGH); // Ajuste LOW/HIGH conforme seu LED
+      digitalWrite(STATUS_LED_PIN, ledState ? LOW : HIGH);
       lastBlink = current_millis;
     }
-  } else { // Não alimentando
-    if (WiFi.status() == WL_CONNECTED) { // WiFi conectado: LED aceso (ou apagado, dependendo da lógica)
-      digitalWrite(STATUS_LED_PIN, LOW); // Ex: LOW para aceso (comum para LED_BUILTIN)
-    } else { // WiFi desconectado: pisca lentamente (ex: a cada 1000ms)
+  } else { 
+    if (WiFi.status() == WL_CONNECTED) { 
+      digitalWrite(STATUS_LED_PIN, LOW);
+    } else { 
       if (current_millis - lastBlink > 1000) {
         ledState = !ledState;
         digitalWrite(STATUS_LED_PIN, ledState ? LOW : HIGH);
@@ -1461,24 +1420,22 @@ void updateStatusLED() {
   }
 }
 
-// Função de parada de emergência (ex: falha crítica no filesystem)
 void emergencyStop() {
   Serial.println("EMERGENCY STOP ACTIVATED!");
-  digitalWrite(currentFeederPin, LOW); // Garante que o alimentador esteja desligado
+  digitalWrite(currentFeederPin, LOW);
   pinMode(STATUS_LED_PIN, OUTPUT);
-  while(true) { // Loop infinito piscando o LED rapidamente
+  while(true) {
     digitalWrite(STATUS_LED_PIN, LOW); delay(100);
     digitalWrite(STATUS_LED_PIN, HIGH); delay(100);
   }
 }
 
 // =============== Network Setup =============== //
-// Configura a rede WiFi e sincroniza o tempo (NTP e RTC)
 void setupNetwork() {
-  wifiManager.setConfigPortalTimeout(180); // Portal de configuração expira em 3 minutos
-  wifiManager.setConnectTimeout(30);       // Tenta conectar por 30 segundos
+  wifiManager.setConfigPortalTimeout(180);
+  wifiManager.setConnectTimeout(30);
 
-  if (!wifiManager.autoConnect("PetFeederAP")) { // Tenta conectar, se falhar, inicia AP "PetFeederAP"
+  if (!wifiManager.autoConnect("TemporizadorAP")) { 
     Serial.println("Falha ao conectar ao WiFi e o portal de configuração expirou. Reiniciando...");
     delay(3000);
     ESP.restart();
@@ -1488,18 +1445,18 @@ void setupNetwork() {
   Serial.print("IP address: "); Serial.println(WiFi.localIP());
 
   Serial.println("Configurando time para UTC (GMT+0) para sincronização NTP inicial...");
-  configTime(0, 0, NTP_SERVER); // GMT+0, sem DST, servidor NTP
+  configTime(0, 0, NTP_SERVER);
 
   Serial.print("Aguardando sincronização NTP (UTC)...");
   time_t utcTime = 0;
   int tentativasNTP = 0;
   bool ntpUtcSuccess = false;
 
-  while (tentativasNTP < 60) { // Tenta por ~30 segundos
+  while (tentativasNTP < 60) {
     utcTime = time(nullptr);
     int current_year = year(utcTime);
     Serial.printf("\nTentativa NTP (UTC) %d: utcTime = %lu, ano = %d", tentativasNTP + 1, (unsigned long)utcTime, current_year);
-    if (current_year > 2023) { // Ano válido (ex: > 2023)
+    if (current_year > 2023) { // Ano válido para considerar NTP bem-sucedido
         ntpUtcSuccess = true;
         break;
     }
@@ -1515,29 +1472,37 @@ void setupNetwork() {
     sprintf(utcBuf, "%04d-%02d-%02d %02d:%02d:%02d UTC", year(utcTime), month(utcTime), day(utcTime), hour(utcTime), minute(utcTime), second(utcTime));
     Serial.println(utcBuf);
 
-    time_t localTime = utcTime + GMT_OFFSET_SEC + DAYLIGHT_OFFSET_SEC; // Calcula tempo local
-    setTime(localTime); // Define o tempo local na TimeLib
+    time_t localTime = utcTime + GMT_OFFSET_SEC + DAYLIGHT_OFFSET_SEC;
+    setTime(localTime); // Define o tempo na TimeLib
 
-    Serial.print("Hora local calculada e definida na TimeLib: ");
+    Serial.print("Hora local (NTP) definida na TimeLib: ");
     Serial.println(getCurrentDateTimeString());
 
-    if (rtcInitialized) { // Se RTC ok, ajusta-o com o tempo NTP
+    if (rtcInitialized) {
         rtc.adjust(DateTime(year(), month(), day(), hour(), minute(), second()));
-        Serial.println("RTC DS3231 sincronizado com a hora local (NTP).");
+        Serial.println("RTC DS3231 sincronizado COM a hora local obtida via NTP.");
     } else {
-        Serial.println("RTC não inicializado, não foi possível sincronizar com NTP.");
+        Serial.println("RTC DS3231 não presente/inicializado. Hora do sistema definida apenas via NTP.");
     }
-  } else { // Falha NTP
-    Serial.println("Falha ao obter hora válida do NTP (UTC) após várias tentativas!");
-    Serial.print("Último valor de utcTime: "); Serial.println(utcTime);
-    Serial.print("Último ano obtido (UTC): "); Serial.println(year(utcTime));
-
-    if (rtcInitialized && !rtc.lostPower()) { // Se RTC ok e com bateria
-        Serial.println("Usando hora do RTC pois NTP falhou e RTC tem hora válida.");
-        syncTimeLibWithRTC();
-        Serial.print("Hora atual (RTC): "); Serial.println(getCurrentDateTimeString());
-    } else {
-        Serial.println("NTP falhou E RTC sem hora válida (ou não encontrado). Sistema sem hora correta!");
+  } else {
+    Serial.println("Falha ao obter hora válida do NTP (UTC) após várias tentativas.");
+    if (rtcInitialized) {
+        if (!rtc.lostPower()) { // RTC está presente E indica que tem hora válida
+            Serial.println("NTP falhou. Usando hora do RTC DS3231 como fallback (RTC indica hora válida).");
+            syncTimeLibWithRTC(); // Sincroniza TimeLib a partir do RTC
+            Serial.print("Hora atual (RTC fallback): ");
+            Serial.println(getCurrentDateTimeString());
+        } else { // RTC está presente MAS indica perda de energia
+            Serial.println("NTP falhou. RTC DS3231 presente, mas indica perda de energia (hora do RTC pode ser inválida).");
+            Serial.println("Sistema operará sem hora sincronizada confiavelmente.");
+            // Opcional: definir TimeLib para um valor padrão como 0 ou tempo de compilação
+            // setTime(0); // Exemplo: reseta para o início da epoch Unix
+        }
+    } else { // NTP falhou E RTC não está presente/inicializado
+        Serial.println("NTP falhou. RTC DS3231 não presente/inicializado.");
+        Serial.println("Sistema operará sem hora sincronizada.");
+        // Opcional: definir TimeLib para um valor padrão
+        // setTime(0);
     }
   }
 }
@@ -1546,7 +1511,7 @@ void setupNetwork() {
 void handleGetEvents() {
   if (eventLog.length() > 0) {
     server.send(200, "text/plain", eventLog);
-    eventLog = ""; // Limpa o log após enviar
+    eventLog = "";
   } else {
     server.send(200, "text/plain", "");
   }
@@ -1557,59 +1522,58 @@ void handleGetEvents() {
 void setup() {
   Serial.begin(115200);
   Serial.println();
-  Serial.println("=== Iniciando Pet Feeder com DS3231 ===");
+  Serial.println("=== Iniciando Temporizador Inteligente ==="); 
 
   loadConfig();
   setupHardware();
 
-  #if defined(ESP8266) // Pinos I2C para ESP8266 (NodeMCU/Wemos D1 Mini)
-    Wire.begin(D2, D1); // D2 (GPIO4) = SDA, D1 (GPIO5) = SCL. Ajuste se necessário.
-  #elif defined(ESP32) // Pinos I2C padrão para ESP32
-    Wire.begin();       // GPIO21 (SDA), GPIO22 (SCL)
+  #if defined(ESP8266)
+    Wire.begin(D2, D1);
+  #elif defined(ESP32)
+    Wire.begin();
   #else
-    Wire.begin();       // Padrão Arduino
+    Wire.begin();
   #endif
 
   if (rtc.begin()) {
     rtcInitialized = true;
     Serial.println("RTC DS3231 encontrado e inicializado.");
     if (rtc.lostPower()) {
-      Serial.println("RTC perdeu energia (lostPower = true). A hora será ajustada via NTP se disponível.");
+      Serial.println("RTC indica perda de energia (lostPower = true). Hora do RTC pode ser inválida até sincronização NTP.");
     } else {
-      Serial.println("RTC com hora válida (lostPower = false). Sincronizando relógio do sistema (TimeLib) com RTC.");
-      syncTimeLibWithRTC();
-      Serial.print("Hora inicial (do RTC): "); Serial.println(getCurrentDateTimeString());
+      Serial.println("RTC com hora aparentemente válida (lostPower = false). Aguardando NTP para possível ajuste ou uso como fallback.");
+      // Não sincronizar TimeLib com RTC aqui; NTP é prioritário.
+      // A hora do RTC será usada como fallback em setupNetwork() se NTP falhar.
     }
   } else {
-    Serial.println("Erro: RTC DS3231 não encontrado! Verifique a fiação. rtcInitialized = false");
+    Serial.println("RTC DS3231 não encontrado. O sistema dependerá exclusivamente do NTP para a hora.");
     rtcInitialized = false;
   }
 
-  setupNetwork(); // Conecta WiFi, sincroniza NTP e RTC
+  setupNetwork(); // Tenta NTP primeiro, depois RTC como fallback.
 
   // Inicializa timers de regras customizadas se estiverem ativas no boot
   if (customEnabled) {
-      time_t t_now = now();
+      time_t t_now = now(); // 'now()' aqui usará o tempo já definido por NTP ou RTC fallback
       if (digitalRead(currentFeederPin) == LOW) {
           ruleLowDT = t_now; ruleHighDT = 0;
-          Serial.println(timeStr(t_now) + " -> Inicialização: Regras custom ATIVADAS, Disp. DESLIGADO. Contagem IL iniciada.");
+          Serial.println(timeStr(t_now) + " -> Inicialização: Regras custom ATIVADAS, Saída DESLIGADA. Contagem IL iniciada.");
       } else {
           ruleHighDT = t_now; ruleLowDT = 0;
-          Serial.println(timeStr(t_now) + " -> Inicialização: Regras custom ATIVADAS, Disp. LIGADO. Contagem IH iniciada.");
+          Serial.println(timeStr(t_now) + " -> Inicialização: Regras custom ATIVADAS, Saída LIGADA. Contagem IH iniciada.");
       }
   } else {
       ruleHighDT = 0; ruleLowDT = 0;
   }
 
-  // Configuração dos handlers do servidor web
   server.on("/", HTTP_GET, handleRoot);
   server.on("/rssi", HTTP_GET, handleRssi);
   server.on("/time", HTTP_GET, handleTime);
   server.on("/nextTriggerTime", HTTP_GET, handleNextTriggerTime);
-  server.on("/setFeederPin", HTTP_POST, handleSetFeederPin);
+  server.on("/setFeederPin", HTTP_POST, handleSetOutputPin); // Endpoint JS usa 'feederPin', handler C++ renomeado
   server.on("/status", HTTP_GET, handleStatus);
-  server.on("/stopFeedNow", HTTP_POST, handleStopFeedNow);
-  server.on("/feedNow", HTTP_POST, handleFeedNow);
+  server.on("/stopFeedNow", HTTP_POST, handleDeactivateOutputNow); // Endpoint JS usa 'stopFeedNow'
+  server.on("/feedNow", HTTP_POST, handleActivateOutputNow);     // Endpoint JS usa 'feedNow'
   server.on("/setManualDuration", HTTP_POST, handleSetManualDuration);
   server.on("/setSchedules", HTTP_POST, handleSetSchedules);
   server.on("/setCustomRules", HTTP_POST, handleSetCustomRules);
@@ -1625,8 +1589,8 @@ void setup() {
 
   Serial.println("--- Configuração Final e Status ---");
   Serial.printf("Hora atual do sistema: %s\n", getCurrentDateTimeString().c_str());
-  Serial.printf("Pino do Alimentador: GPIO %d\n", currentFeederPin);
-  Serial.printf("Duração manual: %s\n", formatHHMMSS(manualDurationSec).c_str());
+  Serial.printf("Pino de Saída: GPIO %d\n", currentFeederPin);
+  Serial.printf("Duração manual de ativação: %s\n", formatHHMMSS(manualDurationSec).c_str());
   Serial.printf("Agendamentos: %d\n", scheduleCount);
   Serial.printf("Regras personalizadas: \"%s\" [%s]\n",
                 customSchedule,
@@ -1640,54 +1604,56 @@ void setup() {
 
 // =============== Main Loop =============== //
 void loop() {
-  // Sincronização periódica com RTC (ex: a cada 5 minutos)
-  if (rtcInitialized && (millis() % 300000 == 0)) {
+  if (rtcInitialized && (millis() % 300000 == 0)) { // A cada 5 minutos
+    // A função syncTimeLibWithRTC() já tem uma verificação interna de validade do ano.
+    // Se o RTC foi ajustado pelo NTP, esta sincronização mantém TimeLib alinhada com essa hora.
+    // Se NTP falhou e RTC foi usado como fallback (e era válido), mantém TimeLib alinhada com RTC.
+    // Se NTP falhou e RTC também estava inválido, a verificação no syncTimeLibWithRTC impedirá a sincronização.
     syncTimeLibWithRTC();
-    Serial.println(timeStr(now()) + " -> Sincronização periódica TimeLib <- RTC realizada.");
-  } else if (!rtcInitialized && (millis() % 60000 == 0)) { // Avisa se RTC não está ok
-    Serial.println(timeStr(now()) + " -> AVISO NO LOOP: RTC não foi inicializado. Sincronização periódica desativada.");
+    Serial.println(timeStr(now()) + " -> Sincronização periódica TimeLib <- RTC realizada (se RTC válido).");
+  } else if (!rtcInitialized && (millis() % 60000 == 0)) { // A cada minuto, se RTC não foi inicializado
+    Serial.println(timeStr(now()) + " -> AVISO NO LOOP: RTC não foi inicializado. Sincronização periódica com RTC desativada.");
   }
 
   server.handleClient();
   updateStatusLED();
 
-  #ifdef SONOFF_BASIC // Lógica do botão para Sonoff Basic
-    bool rawState = digitalRead(BUTTON_PIN); // Renomeado de 'raw'
+  #ifdef SONOFF_BASIC
+    bool rawState = digitalRead(BUTTON_PIN);
     if (rawState != lastButtonState) {
       lastDebounceMs = millis();
     }
     if (millis() - lastDebounceMs > DEBOUNCE_DELAY) {
       static bool buttonPressHandled = false;
-      if (rawState == LOW && !buttonPressHandled) { // Botão pressionado
-        if (!isFeeding && (millis() - lastTriggerMs >= FEED_COOLDOWN * 1000UL || lastTriggerMs == 0)) {
-          String logIntent = timeStr(now()) + " -> Botão físico pressionado para LIGAR.";
+      if (rawState == LOW && !buttonPressHandled) {
+        if (!isOutputActive && (millis() - lastTriggerMs >= FEED_COOLDOWN * 1000UL || lastTriggerMs == 0)) {
+          String logIntent = timeStr(now()) + " -> Botão físico pressionado para LIGAR SAÍDA.";
           Serial.println(logIntent); eventLog += logIntent + "\n";
-          startFeeding(manualDurationSec);
+          startOutput(manualDurationSec);
         } else {
-          String msg = timeStr(now()) + " -> Botão manual: cooldown ou alimentador já ativo.";
+          String msg = timeStr(now()) + " -> Botão manual: cooldown ou saída já ativa.";
           Serial.println(msg); eventLog += msg + "\n";
         }
         buttonPressHandled = true;
       }
-      if (rawState == HIGH) { // Botão liberado
+      if (rawState == HIGH) {
         buttonPressHandled = false;
       }
     }
     lastButtonState = rawState;
   #endif
 
-  // Parada automática da alimentação por tempo (para durações definidas)
-  if (isFeeding && feedDurationMs > 0 && feedDurationMs <= (unsigned long)MAX_FEED_DURATION * 1000UL) {
-      if (millis() - feedStartMs >= feedDurationMs) {
-        String logIntent = timeStr(now()) + " -> Duração da alimentação (" + formatHHMMSS(feedDurationMs/1000) + ") expirou (via loop timer).";
+  // Parada automática da ativação da saída por tempo (para durações definidas)
+  if (isOutputActive && outputActivationDurationMs > 0 && outputActivationDurationMs <= (unsigned long)MAX_FEED_DURATION * 1000UL) {
+      if (millis() - outputActivationStartMs >= outputActivationDurationMs) {
+        String logIntent = timeStr(now()) + " -> Duração da ativação (" + formatHHMMSS(outputActivationDurationMs/1000) + ") expirou (via loop timer).";
         Serial.println(logIntent);
         eventLog += logIntent + "\n";
-        stopFeeding();
+        stopOutput();
       }
   }
 
 
-  // Processamento de regras (agendadas ou personalizadas)
   if (customEnabled) {
     if (!notifiedStart) {
       String ts = timeStr(now());
@@ -1696,148 +1662,125 @@ void loop() {
       notifiedStart = true;
     }
     scheduleChk(customSchedule, currentFeederPin);
-  } else { // Regras customizadas desativadas
+  } else {
     if (notifiedStart) {
         String ts = timeStr(now());
         Serial.println(ts + " -> Loop: Regras customizadas DESATIVADAS. Processando checkSchedules.");
         eventLog += ts + " -> Loop: Regras customizadas DESATIVADAS. Processando checkSchedules.\n";
         notifiedStart = false;
     }
-    if (!isFeeding) { // Só verifica agendamentos normais se não estiver alimentando
+    if (!isOutputActive) { // Só verifica agendamentos normais se a saída não estiver ativa
         checkSchedules();
     }
   }
 
-  yield(); // Importante para ESP8266
+  yield();
 }
 
 
-// Inicia alimentação por 'durationSec' segundos
-// Se durationSec > MAX_FEED_DURATION, considera-se "ligar até outra regra desligar" (para regras customizadas)
-void startFeeding(unsigned long durationSec) {
-  if (isFeeding) {
-    return; // Já está alimentando
+// Inicia ativação da saída por 'durationSec' segundos
+void startOutput(unsigned long durationSec) { 
+  if (isOutputActive) {
+    return;
   }
 
   unsigned long current_millis = millis();
   if (lastTriggerMs != 0 && (current_millis - lastTriggerMs < FEED_COOLDOWN * 1000UL)) {
-    String cooldownMsg = timeStr(now()) + " -> Tentativa de LIGAR em cooldown ("+String(FEED_COOLDOWN)+"s). Ignorado.";
+    String cooldownMsg = timeStr(now()) + " -> Tentativa de LIGAR SAÍDA em cooldown ("+String(FEED_COOLDOWN)+"s). Ignorado.";
     Serial.println(cooldownMsg);
     eventLog += cooldownMsg + "\n";
     return;
   }
 
-  isFeeding = true;
-  feedStartMs = current_millis;
+  isOutputActive = true; 
+  outputActivationStartMs = current_millis;
 
   unsigned long actualDurationSec = durationSec;
 
   if (customEnabled) {
       int ihTimeSec = parseRuleTime("IH", customSchedule);
-      if (ihTimeSec != -1 && ihTimeSec > 0) { // Se IH existe e é válida (>0)
-          // A duração real será o MENOR entre o solicitado (durationSec) e o tempo de IH.
-          // Se durationSec for MAX_FEED_DURATION+1 (sinal de "ligar por regra"),
-          // então actualDurationSec será ihTimeSec.
-          // Se durationSec for manual (ex: 5s) e ihTimeSec for 30s, actualDurationSec será 5s.
-          // Se durationSec for manual (ex: 60s) e ihTimeSec for 30s, actualDurationSec será 30s.
+      if (ihTimeSec != -1 && ihTimeSec > 0) {
           actualDurationSec = min((unsigned long)ihTimeSec, durationSec);
-      } else { // Sem regra IH válida, ou IH=0
-          // Se durationSec é o sinalizador de "ligar por regra custom sem IH"
+      } else {
           if (durationSec == (MAX_FEED_DURATION + 1)) {
-              actualDurationSec = MAX_FEED_DURATION + 1; // Mantém "infinito"
-          } else { // Duração manual/agendada normal, limita pela constante global
+              actualDurationSec = MAX_FEED_DURATION + 1;
+          } else {
               actualDurationSec = min(durationSec, (unsigned long)MAX_FEED_DURATION);
           }
       }
-  } else { // Regras customizadas desativadas, só agendamentos/manual
+  } else {
       actualDurationSec = min(durationSec, (unsigned long)MAX_FEED_DURATION);
   }
 
-  // Garante pelo menos 1s se a intenção era ligar (durationSec > 0) mas actualDurationSec calculou 0
   if (actualDurationSec == 0 && durationSec > 0) {
       actualDurationSec = 1;
   }
-  // Cap final, exceto para o sinalizador "infinito"
   if (actualDurationSec > (MAX_FEED_DURATION + 1) ) {
       actualDurationSec = MAX_FEED_DURATION + 1;
   }
 
-
-  // Define feedDurationMs para o temporizador do loop
   if (actualDurationSec > MAX_FEED_DURATION && actualDurationSec == (MAX_FEED_DURATION + 1)) {
-      // Sinalizador "infinito": o temporizador do loop não deve desligar, apenas as regras IH em scheduleChk.
-      // No entanto, para segurança, podemos definir um tempo muito longo ou 0 para que o loop não interfira.
-      // Se definirmos 0, a condição `millis() - feedStartMs >= feedDurationMs` no loop não desligará.
-      // Mas isso requer que `feedDurationMs > 0` na condição do loop para parada automática.
-      // Vamos manter a lógica original: o loop timer vai tentar desligar após MAX_FEED_DURATION+1 segundos.
-      // A regra IH em scheduleChk é o principal mecanismo de desligamento para durações indefinidas.
-      feedDurationMs = actualDurationSec * 1000UL;
-  } else if (actualDurationSec > 0) { // Duração finita e válida
-      feedDurationMs = actualDurationSec * 1000UL;
-  } else { // Duração é 0 (ou se tornou 0 e não foi corrigida para 1s)
-      feedDurationMs = 0; // Não deve ficar ligado
-      // Se feedDurationMs for 0, o loop principal o desligará quase imediatamente.
-      // Se actualDurationSec foi 0, mas durationSec original era >0, já foi corrigido para 1s.
-      // Este caso (actualDurationSec = 0) só ocorreria se durationSec original fosse 0.
+      outputActivationDurationMs = actualDurationSec * 1000UL;
+  } else if (actualDurationSec > 0) {
+      outputActivationDurationMs = actualDurationSec * 1000UL;
+  } else {
+      outputActivationDurationMs = 0;
   }
-
 
   digitalWrite(currentFeederPin, HIGH);
   lastTriggerMs = current_millis;
 
   time_t currentTime = now();
-  String logMsg = timeStr(currentTime) + " -> Alimentador LIGADO.";
+  String logMsg = timeStr(currentTime) + " -> Saída LIGADA.";
 
-  if (actualDurationSec > MAX_FEED_DURATION) { // Sinalizador "infinito"
+  if (actualDurationSec > MAX_FEED_DURATION) {
     logMsg += " (Tempo indefinido, aguardando regra IH ou parada manual/outra regra).";
   } else if (actualDurationSec > 0) {
     logMsg += " Duração programada: " + formatHHMMSS(actualDurationSec) + ".";
-  } else { // actualDurationSec == 0
+  } else {
     logMsg += " (Duração programada: 0s, desligará imediatamente).";
   }
 
 
   if (customEnabled) {
-      ruleHighDT = currentTime; // Registra que o pino foi para HIGH sob regras custom
-      ruleLowDT = 0;            // Zera o timer de LOW
-      int ihTimeSec_log = parseRuleTime("IH", customSchedule); // Para log
+      ruleHighDT = currentTime;
+      ruleLowDT = 0;
+      int ihTimeSec_log = parseRuleTime("IH", customSchedule);
       if (ihTimeSec_log != -1 && ihTimeSec_log > 0 && actualDurationSec == (unsigned long)ihTimeSec_log && actualDurationSec <= MAX_FEED_DURATION) {
-          // Se a duração foi efetivamente definida pela regra IH (e não é "infinita")
           time_t predictedOffTime = currentTime + ihTimeSec_log;
           logMsg += " Desligamento por IH ("+formatHHMMSS(ihTimeSec_log)+") previsto para " + timeStr(predictedOffTime) + ".";
-      } else if (actualDurationSec > 0 && actualDurationSec <= MAX_FEED_DURATION) { // Duração finita, não "infinita"
+      } else if (actualDurationSec > 0 && actualDurationSec <= MAX_FEED_DURATION) {
           logMsg += " Desligamento por tempo (loop timer ou IH em scheduleChk) previsto para " + timeStr(currentTime + actualDurationSec) + ".";
       }
-  } else if (actualDurationSec > 0 && actualDurationSec <= MAX_FEED_DURATION) { // Agendamento/manual com duração finita
+  } else if (actualDurationSec > 0 && actualDurationSec <= MAX_FEED_DURATION) {
       logMsg += " Desligamento por tempo (loop timer) previsto para " + timeStr(currentTime + actualDurationSec) + ".";
   }
 
   Serial.println(logMsg);
   eventLog += logMsg + "\n";
 
-  // Se a duração for 0, desliga imediatamente (embora o loop também o faria)
-  if (feedDurationMs == 0) {
-      String immediateOffLog = timeStr(now()) + " -> Duração de 0s, desligando imediatamente em startFeeding.";
+  if (outputActivationDurationMs == 0) {
+      String immediateOffLog = timeStr(now()) + " -> Duração de 0s, desligando saída imediatamente em startOutput.";
       Serial.println(immediateOffLog);
       eventLog += immediateOffLog + "\n";
-      stopFeeding();
+      stopOutput();
   }
 }
 
-// Interrompe alimentação imediatamente
-void stopFeeding() {
-  if (isFeeding) {
+// Interrompe ativação da saída imediatamente
+void stopOutput() { 
+  if (isOutputActive) { 
     digitalWrite(currentFeederPin, LOW);
-    isFeeding = false;
-    feedDurationMs = 0; // Zera a duração programada para evitar re-trigger no loop
+    isOutputActive = false;
+    outputActivationDurationMs = 0;
     time_t stopTime = now();
-    String logMsg = timeStr(stopTime) + " -> Alimentador DESLIGADO.";
+    String logMsg = timeStr(stopTime) + " -> Saída DESLIGADA.";
 
     if (customEnabled) {
-      ruleLowDT = stopTime; // Registra que o pino foi para LOW sob regras custom
-      ruleHighDT = 0;       // Zera o timer de HIGH
+      ruleLowDT = stopTime;
+      ruleHighDT = 0;
       int ilTimeSec = parseRuleTime("IL", customSchedule);
-      if (ilTimeSec != -1 && ilTimeSec > 0) { // Se IL existe e é válida
+      if (ilTimeSec != -1 && ilTimeSec > 0) {
         time_t predictedOnTime = stopTime + ilTimeSec;
         logMsg += " Próxima ativação por IL (" + formatHHMMSS(ilTimeSec) + ") prevista para " + timeStr(predictedOnTime) + ".";
       }
